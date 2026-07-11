@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2023-present Team CoreELEC (https://coreelec.org)
+#
+# SamuriHL CE22 OVERRIDE (Smart CMv4.0 feature). Upstream has since adopted
+# libdovi 3.4.0 and its own from-source path, so this file is now upstream's
+# verbatim except for the forced BUILD_FROM_SRC below.
+#
+# WHY THE FORCE: our Smart CMv4.0 feature needs patches/0001-rpu-synthesise-L8-
+# trims-*.patch, which can only apply to a source build. Upstream's prebuilt
+# branch ships an unpatched libdovi, and BUILD_FROM_SRC is set NOWHERE else in
+# this tree (it appears only in this file), so without this line the default
+# path silently drops the L8-trim synthesis and the DM pins the neutral tone
+# curve. Verified identical source: the from-source tarball sha256 below is
+# byte-identical to the libdovi-3.4.0 archive the fork already builds.
+BUILD_FROM_SRC="yes"
 
 PKG_NAME="libdovi"
 PKG_VERSION="3.4.0"
