@@ -1,0 +1,60 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: add user overrides for the STB DM target luminance
+
+The Dolby DM target on the STB control path is hard-coded:
+amdv_target_min = 50 (0.005 nit) and amdv_target_max[src][dst]
+(e.g. DV->HDR10 = 1000 nits) are static with no module_param and no
+debug-command setter, so VS10-processed output always tone-maps to a
+fixed target regardless of the display. Add amdv_target_min_override
+(1/10000 nit) and amdv_target_max_override (nits), both 0 = off, and
+substitute them at the two real control_path call sites.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c	2026-07-14 10:35:35.109332548 -0400
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-07-14 10:36:31.824802803 -0400
+@@ -382,6 +382,17 @@
+ module_param(amdv_graphic_max, uint, 0664);
+ MODULE_PARM_DESC(amdv_graphic_max, "\n amdv_graphic_max\n");
+ 
++/* user overrides for the DM target on the STB control path.
++ * 0 = off (use built-in amdv_target_min / amdv_target_max).
++ * min override in 1/10000 nit (50 = 0.005 nit), max override in nits.
++ */
++static unsigned int amdv_target_min_override;
++static unsigned int amdv_target_max_override;
++module_param(amdv_target_min_override, uint, 0664);
++MODULE_PARM_DESC(amdv_target_min_override, "\n amdv_target_min_override\n");
++module_param(amdv_target_max_override, uint, 0664);
++MODULE_PARM_DESC(amdv_target_max_override, "\n amdv_target_max_override\n");
++
+ static unsigned int dv_HDR10_graphics_max = 300;
+ static unsigned int dv_graphic_blend_test;
+ module_param(dv_graphic_blend_test, uint, 0664);
+@@ -9092,9 +9103,12 @@
+ 			src_bdp, 0, yuv_range,
+ 			graphic_min,
+ 			graphic_max * 10000,
+-			amdv_target_min,
++			amdv_target_min_override ?
++			amdv_target_min_override : amdv_target_min,
++			(amdv_target_max_override ?
++			amdv_target_max_override :
+ 			amdv_target_max
+-			[src_format][dst_format] * 10000,
++			[src_format][dst_format]) * 10000,
+ 			false,
+ 			&hdr10_param,
+ 			&new_dovi_setting);
+@@ -9115,8 +9129,11 @@
+ 		src_bdp, 0, yuv_range, /* bit/chroma/range */
+ 		graphic_min,
+ 		graphic_max * 10000,
+-		amdv_target_min,
+-		amdv_target_max[src_format][dst_format] * 10000,
++		amdv_target_min_override ?
++		amdv_target_min_override : amdv_target_min,
++		(amdv_target_max_override ?
++		amdv_target_max_override :
++		amdv_target_max[src_format][dst_format]) * 10000,
+ 		(!el_flag && !mel_flag) ||
+ 		(dolby_vision_flags & FLAG_DISABLE_COMPOSER),
+ 		&hdr10_param,
