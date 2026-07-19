@@ -29,3 +29,17 @@ PKG_MESON_OPTS_TARGET="-Ddefault_library=shared \
                        -Dfontconfig=enabled \
                        -Dfreetype=enabled \
                        -Dlibxml2=enabled"
+
+# Ship the version-matched BD-J jars in the image (/usr/share/java is in
+# libbluray's default jar search list). The native lib only loads the jar of
+# its EXACT version; the tools.jre.zulu addon carries jars for older
+# libbluray, and its LIBBLURAY_CP override is handled by the
+# libbluray-03-bdj-fallback patch so stale addon jars can no longer kill
+# BD-J. Jars are arch-independent, built from this same source tree
+# (meson -Dbdj_jar=enabled + ant, JDK 21). Rebuild on every version bump.
+post_makeinstall_target() {
+  mkdir -p ${INSTALL}/usr/share/java
+  cp ${PKG_DIR}/jars/libbluray-j2se-${PKG_VERSION}.jar \
+     ${PKG_DIR}/jars/libbluray-awt-j2se-${PKG_VERSION}.jar \
+     ${INSTALL}/usr/share/java/
+}
