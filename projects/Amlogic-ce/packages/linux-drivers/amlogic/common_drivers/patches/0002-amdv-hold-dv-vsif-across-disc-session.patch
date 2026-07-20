@@ -1,0 +1,71 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: hold the DV VSIF across disc-session source gaps
+
+At every decoder swap inside a BD disc session (menu->title, segment
+chains) the no-source gap makes the output policy momentarily leave
+DOVI, and send_hdmi_pkt() tears the Dolby VSIF down to SDR. The sink
+then does a full DV->SDR->DV re-lock (measured 3.2s VSIF gap plus TV
+lock time) exactly as the next segment starts presenting - the viewer
+loses the first seconds of every title (Superman: the first GOP of the
+movie) and sees an SDR-decoded flash of the last DV frame.
+
+Add dolby_vision_vsif_hold: while userspace holds it (the disc player
+keeps every session segment in DV output by construction), swallow the
+DOVI->SDR teardown so the VSIF stays latched and the next segment
+resumes packet-identical - no HDMI transition at all. The holder
+clears it at session end, releasing the normal SDR transition.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c	2026-07-20 16:59:53.774595913 -0400
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-07-20 17:00:27.273151760 -0400
+@@ -174,6 +174,20 @@
+ module_param(dolby_vision_enable, bool, 0664);
+ MODULE_PARM_DESC(dolby_vision_enable, "\n dolby_vision_enable\n");
+ 
++/* Disc-session VSIF hold: set by userspace while a disc player keeps every
++ * segment of a session in DV output (menus VS10-mapped, features native).
++ * While held, the DOVI->SDR HDMI packet teardown in send_hdmi_pkt() is
++ * suppressed so the short no-source gap at a segment/decoder swap never
++ * drops the Dolby VSIF: the sink stays DV-locked and the next segment
++ * resumes packet-identical, with no HDMI transition (no SDR flash, no
++ * multi-second DV re-lock swallowing the segment start). The holder must
++ * clear the flag at session end so the normal SDR transition can run.
++ */
++static bool dolby_vision_vsif_hold;
++static bool vsif_hold_active;
++module_param(dolby_vision_vsif_hold, bool, 0664);
++MODULE_PARM_DESC(dolby_vision_vsif_hold, "\n dolby_vision_vsif_hold\n");
++
+ static bool amdv_efuse_bypass;
+ module_param(amdv_efuse_bypass, bool, 0664);
+ MODULE_PARM_DESC(amdv_efuse_bypass, "\n amdv_efuse_bypass\n");
+@@ -7257,6 +7271,7 @@
+ 		last_dst_format = dst_format;
+ 		vd_signal.signal_type = SIGNAL_DOVI;
+ 		notify_vd_signal_to_amvideo(&vd_signal);
++		vsif_hold_active = false;
+ 	} else if (last_dst_format != dst_format) {
+ 		if (last_dst_format == FORMAT_HDR10) {
+ 			sdr_transition_delay = 0;
+@@ -7291,6 +7306,22 @@
+ 				}
+ 			}
+ 		} else if (last_dst_format == FORMAT_DOVI) {
++			if (dolby_vision_vsif_hold) {
++				/* segment swap inside a held disc session:
++				 * keep the DV VSIF latched and swallow the
++				 * transition. last_dst_format stays DOVI so
++				 * the next DV segment resumes with an
++				 * unchanged packet state (no transition at
++				 * the sink at all).
++				 */
++				if (!vsif_hold_active) {
++					vsif_hold_active = true;
++					pr_dv_dbg("send pkt: VSIF held across source gap (disc session)\n");
++				}
++				sdr_transition_delay = 0;
++				dolby_vision_flags &= ~FLAG_FORCE_HDMI_PKT;
++				return flag;
++			}
+ 			if (vinfo && vinfo->vout_device &&
+ 				vinfo->vout_device->fresh_tx_vsif_pkt) {
+ 				if (vf && (is_hlg_frame(vf) ||
