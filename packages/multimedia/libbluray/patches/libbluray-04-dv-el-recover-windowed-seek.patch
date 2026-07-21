@@ -1,0 +1,143 @@
+From: samurihl <samurihl@gmail.com>
+Date: Tue, 21 Jul 2026 17:00:00 -0400
+Subject: [PATCH] read: recover DV enhancement-layer access unit at windowed playitem entries and seeks
+
+The EP map indexes only the base-layer PID. At windowed playitem
+transitions (start_pkt > 0) and seeks, delivery starts at the BL IDR
+SPN, cutting off the enhancement-layer access unit of the target frame
+(muxed ahead of the BL IDR) - the EL decoder then starts mid-GOP with
+no parameter sets and FEL composition renders black. Rewind delivery
+by up to 768 kB on clips that declare a second in-mux HEVC video PID,
+passing only system packets and the EL PID (rest wiped to padding).
+---
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -90,6 +90,16 @@
+     uint8_t         encrypted_block_cnt;
+     uint8_t         seek_flag;  /* used to fine-tune first read after seek */
+ 
++    /* Dolby Vision dual-layer (in-mux profile 7): the EP map indexes only the
++     * base-layer PID, and the enhancement-layer access unit of the target
++     * frame is muxed ahead of the base-layer IDR the EP map points at. While
++     * SPN(clip_pos) < el_recover_end_pkt, deliver only system packets and the
++     * EL video PID (everything else wiped to padding) so the EL decoder gets
++     * its parameter sets + IDR at windowed playitem entries and seeks.
++     * el_recover_end_pkt == 0 -> inactive. */
++    uint32_t        el_recover_end_pkt;
++    uint16_t        el_recover_pid;
++
+     M2TS_FILTER    *m2ts_filter;
+ } BD_STREAM;
+ 
+@@ -648,6 +658,51 @@
+     m2ts_filter_close(&st->m2ts_filter);
+ }
+ 
++/* max source packets the EL access unit start may precede the BL IDR by:
++ * 4096 * 192 = 768 kB, comfortably above observed UHD-BD FEL EL AU sizes. */
++#define EL_RECOVER_MAX_PKTS 4096
++
++static uint16_t _clip_dv_el_pid(const NAV_CLIP *clip)
++{
++    const struct clpi_cl *cl = clip ? clip->cl : NULL;
++    unsigned ii, jj;
++
++    if (!cl) {
++        return 0;
++    }
++    for (ii = 0; ii < cl->program.num_prog; ii++) {
++        const CLPI_PROG *prog = &cl->program.progs[ii];
++        for (jj = 0; jj < prog->num_streams; jj++) {
++            const CLPI_PROG_STREAM *s = &prog->streams[jj];
++            /* secondary in-mux HEVC video (0x1012..0x101f) = DV enhancement layer */
++            if (s->pid > HDMV_PID_VIDEO && s->pid <= HDMV_PID_VIDEO + 0x0e &&
++                s->coding_type == 0x24) {
++                return s->pid;
++            }
++        }
++    }
++    return 0;
++}
++
++static void _init_el_recover(BD_STREAM *st, uint32_t target_pkt)
++{
++    st->el_recover_end_pkt = 0;
++
++    if (target_pkt > 0) {
++        uint16_t el_pid = _clip_dv_el_pid(st->clip);
++        if (el_pid) {
++            uint32_t rewind_pkt = target_pkt > EL_RECOVER_MAX_PKTS ?
++                                  target_pkt - EL_RECOVER_MAX_PKTS : 0;
++            st->el_recover_end_pkt = target_pkt;
++            st->el_recover_pid     = el_pid;
++            st->clip_pos           = (uint64_t)rewind_pkt * 192;
++            st->clip_block_pos     = (st->clip_pos / 6144) * 6144;
++            BD_DEBUG(DBG_STREAM, "DV EL recover: pid 0x%04x, rewind SPN %u -> target SPN %u\n",
++                     el_pid, rewind_pkt, target_pkt);
++        }
++    }
++}
++
+ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
+ {
+     _close_m2ts(st);
+@@ -661,6 +716,9 @@
+     st->clip_size = 0;
+     st->clip_pos = (uint64_t)st->clip->start_pkt * 192;
+     st->clip_block_pos = (st->clip_pos / 6144) * 6144;
++    if (st == &bd->st0) {
++        _init_el_recover(st, st->clip->start_pkt);
++    }
+     st->eof_hit = 0;
+     st->encrypted_block_cnt = 0;
+ 
+@@ -798,6 +856,28 @@
+                     }
+                 }
+ 
++                if (BD_UNLIKELY(st->el_recover_end_pkt != 0)) {
++                    /* DV dual-layer recovery window: this unit lies (at least
++                     * partly) before the real target packet. Keep system
++                     * packets and the enhancement-layer video; wipe everything
++                     * else (esp. pre-IDR base layer) to padding so only the
++                     * EL access unit reaches the demuxer ahead of the target. */
++                    uint32_t spn = (uint32_t)((st->clip_block_pos - len) / 192);
++                    uint8_t *pkt = buf;
++                    unsigned ii;
++                    for (ii = 0; ii < len / 192; ii++, pkt += 192, spn++) {
++                        if (spn >= st->el_recover_end_pkt) {
++                            st->el_recover_end_pkt = 0;
++                            break;
++                        }
++                        if (TS_PID(pkt) > HDMV_PID_PCR && TS_PID(pkt) != st->el_recover_pid) {
++                            /* set pid to 0x1fff (padding) */
++                            pkt[4 + 2] = 0xff;
++                            pkt[4 + 1] |= 0x1f;
++                        }
++                    }
++                }
++
+                 BD_DEBUG(DBG_STREAM, "Read unit OK!\n");
+ 
+ #ifdef BLURAY_READ_ERROR_TEST
+@@ -922,6 +1002,10 @@
+     st->clip_pos = (uint64_t)clip_pkt * 192;
+     st->clip_block_pos = (st->clip_pos / 6144) * 6144;
+ 
++    if (st == &bd->st0) {
++        _init_el_recover(st, clip_pkt);
++    }
++
+     if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
+         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to seek clip %s!\n", st->clip->name);
+     }
+@@ -929,7 +1013,7 @@
+     st->int_buf_off = 6144;
+     st->seek_flag = 1;
+ 
+-    return st->clip_pos;
++    return (uint64_t)clip_pkt * 192;
+ }
+ 
+ /*
