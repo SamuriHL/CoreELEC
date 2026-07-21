@@ -1,22 +1,24 @@
 From: SamuriHL <samurihl@gmail.com>
 Date: Tue, 21 Jul 2026 10:00:00 -0400
-Subject: [PATCH] HDMV VM: fix the BC (bit compare) instruction to spec semantics
+Subject: [PATCH] HDMV VM: fix the BC (bit compare) instruction operand reversal
 
 The BC compare executed the next instruction iff (dst & ~src) == 0 - a
-subset test that never checks whether the requested bits are SET, only
-that no bits outside the mask are. The BD-ROM spec defines BC as a plain
-bitwise AND: the condition passes when any tested bit is set.
+subset test with the operands reversed that never checks whether the
+requested bits are SET, only that no bits outside the mask are.
 
 Real authoring confirms it: the S&M UHD Benchmark's MovieObject enumerates
 the UHD capability PSR bits one at a time (BC PSR25,0x01 / 0x02 / 0x04 /
 0x20 -> one GPR flag per format, then sums player+display flags per
-format). That per-bit enumeration is only meaningful under "is this bit
-set" - under the subset test a multi-bit capability register fails every
-single-bit test, which forced players to mis-report a single exclusive
-format bit to branch correctly. Capability PSRs (25/26) are genuine OR
-sets, like PSR15; with BC fixed they can carry the truth.
+format). Under the reversed subset test a multi-bit capability register
+fails every single-bit test, which forced players to mis-report a single
+exclusive format bit to branch correctly. Capability PSRs (25/26) are
+genuine OR sets, like PSR15; with BC fixed they can carry the truth.
 
-Analysis credit: Hendrik Leppkes spotted the inverted implementation.
+Fix matches upstream MR 76 by Hendrik Leppkes (who spotted the inverted
+implementation): condition passes when all bits of src (the mask) are set
+in dst (the register). All known discs test a single bit at a time, where
+full-match and any-match are identical; the full-match reading is kept for
+upstream parity.
 ---
  src/libbluray/hdmv/hdmv_vm.c | 6 +++++-
  1 file changed, 5 insertions(+), 1 deletion(-)
@@ -29,11 +31,11 @@ diff --git a/src/libbluray/hdmv/hdmv_vm.c b/src/libbluray/hdmv/hdmv_vm.c
              }
              switch (insn->cmp_opt) {
 -                case INSN_BC: p->pc += !!(dst & ~src); break;
-+                /* spec: plain bitwise AND - condition passes when any tested
-+                 * bit is set. The previous (dst & ~src) subset test never
-+                 * checked the requested bits at all and broke capability-set
-+                 * registers (PSR25/26) for every disc enumerating them. */
-+                case INSN_BC: p->pc += !(dst & src); break;
++                /* Condition passes when all bits of src (the mask) are set
++                 * in dst (the register). The previous (dst & ~src) subset
++                 * test had the operands reversed and never checked the
++                 * requested bits at all (upstream libbluray MR 76). */
++                case INSN_BC: p->pc += !!(src & ~dst); break;
                  case INSN_EQ: p->pc += !(dst == src); break;
                  case INSN_NE: p->pc += !(dst != src); break;
                  case INSN_GE: p->pc += !(dst >= src); break;
