@@ -3,9 +3,15 @@ Subject: drm: only force the DV tunnel wire format when the output is DV
 
 meson_hdmitx_decide_color_attr forces the Dolby Vision tunnelling wire
 format (RGB/444 8-bit for STD, YUV422 12-bit for LL) whenever the amdv
-core is enabled. That predicate is too broad: VS10 can run the DV core
-(FEL expand, DM tone-map) while the OUTPUT is forced to HDR10 or SDR
-(dolby_vision_mode HDR10/SDR10/SDR8).
+core is enabled. That predicate is too broad: the DV core can be enabled
+while the OUTPUT on the wire is not Dolby Vision. Two such cases:
+
+ - VS10 forces an HDR10/SDR output mode (FEL expand, DM tone-map) while
+   dolby_vision_mode is HDR10/SDR10/SDR8; and
+ - the disc-session native release (aml_dv_release_disc_engage) leaves the
+   core enabled under FOLLOW_SOURCE and lets a selected non-DV title
+   signal its own native format - e.g. picking the HDR10 demo from the
+   Spears & Munsil UHD Benchmark's format-selector on an otherwise-DV disc.
 
 Sequence on a VS10 DV->HDR10 playback: amdv engages HDR10 and hdmitx
 accepts the DRM packet on the existing 10/12-bit wire (the HDR10 toast
@@ -18,30 +24,49 @@ hdmitx_set_drm_pkt refuse every subsequent HDR10 packet (8-bit +
 for the rest of playback. Same mechanism for DV FEL and profile 8.1 on
 every SoC family (hdmitx20 and hdmitx21).
 
-Gate the two format-force sites on the amdv TARGET OUTPUT mode instead:
-keep the tunnel force for IPT/IPT_TUNNEL (and BYPASS, matching today's
-behaviour while the mode is not yet resolved), skip it when VS10 targets
-HDR10/SDR10/SDR8 so the native attr/EDID selection (e.g. 422,12bit)
-carries the forced-HDR10 signal exactly like native HDR10 playback.
+The disc-session release hits the identical wire trap by a different door:
+release_disc_engage sets dolby_vision_policy=FOLLOW_SOURCE and dv_mode=0
+(target mode BYPASS) but does NOT clear dolby_vision_enable (the latch
+keeps the core up across the session). So is_amdv_enable() stays true and
+the DV wire is forced onto the native HDR10 title. On a lenient sink (LG)
+the HDR10 packet survives; on a strict sink (Sony) the HDR10 signal on an
+8-bit/444 DV wire renders as a magenta/pink cast. Switching back to a DV
+title puts a real DV signal on the DV wire, so it looks correct again -
+the reported DV->HDR10 pink / HDR10->DV recovery asymmetry.
+
+Gate the two format-force sites on the amdv output being genuinely DV:
+the core enabled, the policy actually FORCING an output (FOLLOW_SOURCE is
+a native release, never a DV wire), and the target mode not one of the
+non-DV VS10 outputs (HDR10/SDR10/SDR8). IPT/IPT_TUNNEL - and the transient
+BYPASS while a FORCE engage is still resolving - keep the tunnel force
+exactly as before; only the FOLLOW_SOURCE native release now yields the
+native attr/EDID selection (e.g. 422,12bit) that carries HDR10 cleanly.
 
 --- a/drivers/drm/meson_hdmi.c
 +++ b/drivers/drm/meson_hdmi.c
-@@ -286,6 +286,23 @@
+@@ -286,6 +286,30 @@
  		return true;
  }
-
+ 
 +/* The Dolby Vision tunnelling wire-format constraints (RGB/444 8-bit for
 + * STD, YUV422 12-bit for LL) only apply when the signal on the wire is
-+ * actually Dolby Vision. VS10 can run the DV core while outputting
-+ * HDR10/SDR (forced output mode); those cases must keep the native
-+ * format selection: an 8-bit wire makes hdmitx refuse the HDR10 DRM
-+ * packet and drop the signal to SDR.
++ * actually Dolby Vision. The DV core can be enabled while the OUTPUT is
++ * not DV:
++ *  - VS10 forcing an HDR10/SDR output mode (FEL expand, DM tone-map), and
++ *  - the disc-session native release (aml_dv_release_disc_engage): the
++ *    core stays enabled under FOLLOW_SOURCE while a selected title signals
++ *    its own native HDR10 (S&M UHD Benchmark HDR10 demo off a DV disc).
++ * Both must keep the native format selection: an 8-bit/444 wire makes
++ * hdmitx refuse the HDR10 DRM packet, dropping it to SDR on lenient sinks
++ * or a magenta cast on strict sinks (Sony). FOLLOW_SOURCE never forces a
++ * DV wire; only FORCE_OUTPUT_MODE with a DV target does.
 + */
 +static bool is_amdv_output_dv(void)
 +{
 +	int mode = get_amdv_target_mode();
 +
 +	return is_amdv_enable() &&
++	       get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE &&
 +	       mode != AMDV_OUTPUT_MODE_HDR10 &&
 +	       mode != AMDV_OUTPUT_MODE_SDR10 &&
 +	       mode != AMDV_OUTPUT_MODE_SDR8;
@@ -60,7 +85,7 @@ carries the forced-HDR10 signal exactly like native HDR10 playback.
  		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
  			attr->colorformat = HDMI_COLORSPACE_YUV444;
 @@ -362,7 +379,7 @@
-
+ 
  	// check for bit colourdepth limit
  	// force bit colourdepth when DV mode
 -	if (is_amdv_enable()) {
