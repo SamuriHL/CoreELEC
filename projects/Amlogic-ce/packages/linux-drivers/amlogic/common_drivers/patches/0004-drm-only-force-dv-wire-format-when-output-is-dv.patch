@@ -1,0 +1,70 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: drm: only force the DV tunnel wire format when the output is DV
+
+meson_hdmitx_decide_color_attr forces the Dolby Vision tunnelling wire
+format (RGB/444 8-bit for STD, YUV422 12-bit for LL) whenever the amdv
+core is enabled. That predicate is too broad: VS10 can run the DV core
+(FEL expand, DM tone-map) while the OUTPUT is forced to HDR10 or SDR
+(dolby_vision_mode HDR10/SDR10/SDR8).
+
+Sequence on a VS10 DV->HDR10 playback: amdv engages HDR10 and hdmitx
+accepts the DRM packet on the existing 10/12-bit wire (the HDR10 toast
+the user briefly sees). ~1s later Kodi's refresh-rate switch triggers a
+DRM modeset; decide_color_attr sees is_amdv_enable() and forces the wire
+to YUV444 8-bit. The modeset teardown drops the DRM packet ("Dolby VSIF,
+switching signal to SDR") and the new 8-bit wire makes
+hdmitx_set_drm_pkt refuse every subsequent HDR10 packet (8-bit +
+!config_csc_en -> forced BT709 SDR), so the signal latches on 8-bit SDR
+for the rest of playback. Same mechanism for DV FEL and profile 8.1 on
+every SoC family (hdmitx20 and hdmitx21).
+
+Gate the two format-force sites on the amdv TARGET OUTPUT mode instead:
+keep the tunnel force for IPT/IPT_TUNNEL (and BYPASS, matching today's
+behaviour while the mode is not yet resolved), skip it when VS10 targets
+HDR10/SDR10/SDR8 so the native attr/EDID selection (e.g. 422,12bit)
+carries the forced-HDR10 signal exactly like native HDR10 playback.
+
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -286,6 +286,23 @@
+ 		return true;
+ }
+
++/* The Dolby Vision tunnelling wire-format constraints (RGB/444 8-bit for
++ * STD, YUV422 12-bit for LL) only apply when the signal on the wire is
++ * actually Dolby Vision. VS10 can run the DV core while outputting
++ * HDR10/SDR (forced output mode); those cases must keep the native
++ * format selection: an 8-bit wire makes hdmitx refuse the HDR10 DRM
++ * packet and drop the signal to SDR.
++ */
++static bool is_amdv_output_dv(void)
++{
++	int mode = get_amdv_target_mode();
++
++	return is_amdv_enable() &&
++	       mode != AMDV_OUTPUT_MODE_HDR10 &&
++	       mode != AMDV_OUTPUT_MODE_SDR10 &&
++	       mode != AMDV_OUTPUT_MODE_SDR8;
++}
++
+ static int meson_hdmitx_decide_color_attr
+ 	(struct hdmitx_common *common, struct am_meson_crtc_state *crtc_state,
+ 	struct hdmitx_color_attr *attr, u64 sequence_id)
+@@ -319,7 +336,7 @@
+ 	// try autoselect
+ 	// check if any colour subsampling is set
+ 	// force colour subsampling when DV mode
+-	if (is_amdv_enable()) {
++	if (is_amdv_output_dv()) {
+ 		int cs = attr->colorformat;
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->colorformat = HDMI_COLORSPACE_YUV444;
+@@ -362,7 +379,7 @@
+
+ 	// check for bit colourdepth limit
+ 	// force bit colourdepth when DV mode
+-	if (is_amdv_enable()) {
++	if (is_amdv_output_dv()) {
+ 		int cd = bitdepth_to_colordepth(attr->bitdepth);
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->bitdepth = colordepth_to_bitdepth(COLORDEPTH_24B);
