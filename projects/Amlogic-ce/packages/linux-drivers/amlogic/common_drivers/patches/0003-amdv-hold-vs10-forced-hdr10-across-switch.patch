@@ -1,0 +1,41 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: hold VS10-forced HDR10 across the SDR->HDR switch
+
+When VS10 converts a Dolby Vision source to HDR10 output
+(dolby_vision_policy == AMDV_FORCE_OUTPUT_MODE, force_mode == HDR10), the
+policy process gates HDR10 on sink_support_hdr(vinfo). That helper applies
+the amvecm 8-bit HDR10 limitation: when the CURRENT hdmi output colordepth
+is 8-bit it strips HDR_SUPPORT. During the SDR->HDR mode switch the output
+is transiently still the outgoing 8-bit depth, so a mid-switch re-eval (an
+FEL 'not found el' frame at clip start, or any per-frame event for profile
+8) sees no HDR support and forces SDR8 - itself 8-bit, so it never climbs to
+12-bit HDR10 and latches on SDR. Native HDR10 escapes only because it is
+already 12-bit.
+
+Key the forced-HDR10 decision on the sink's real HDR capability
+(sink_hdr_support_ori_cap, the un-8bit-limited cap - the panel's EDID
+advertises SMPTE ST 2084) instead of the transient output depth, so it holds
+HDR10 through the switch and completes to 12-bit like native HDR10. Applied
+to both the single-core (v1) and multi-core STB (v2_stb) force-HDR10 gates;
+the global sink_hdr_support and its 8-bit protection are untouched.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -4282,7 +4282,7 @@
+ 					src_format, dolby_vision_mode, *mode);
+ 				}
+ 		} else if (force_mode == AMDV_OUTPUT_MODE_HDR10) {
+-			if ((vinfo && sink_support_hdr(vinfo)) ||
++			if ((vinfo && (sink_hdr_support_ori_cap(vinfo) & HDR_SUPPORT)) ||
+ 				debug_force_mode) {
+ 				*mode = AMDV_OUTPUT_MODE_HDR10;
+ 				if (dolby_vision_mode != *mode)
+@@ -4758,7 +4758,7 @@
+ 					src_format, dolby_vision_mode, *mode);
+ 				}
+ 		} else if (force_mode == AMDV_OUTPUT_MODE_HDR10) {
+-			if ((vinfo && sink_support_hdr(vinfo)) ||
++			if ((vinfo && (sink_hdr_support_ori_cap(vinfo) & HDR_SUPPORT)) ||
+ 				debug_force_mode) {
+ 				*mode = AMDV_OUTPUT_MODE_HDR10;
+ 				if (dolby_vision_mode != *mode)
