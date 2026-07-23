@@ -1,0 +1,62 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: auto-clear the DV VSIF hold at core teardown
+
+dolby_vision_vsif_hold (patch 0002) is released only by userspace at disc
+-session end. While set it swallows *every* DOVI->non-DOVI VSIF teardown,
+and enable_amdv(0) - the definitive "DV core off" path taken on stop /
+return-to-GUI - does not clear it. So if userspace ever fails to drop the
+flag (player crash, abnormal stop, or a non-DV title started inside a held
+session without the release call), the SDR teardown stays swallowed and the
+sink is left with BT.2020 + the Dolby VSIF signalled over SDR/GUI pixels,
+with no watchdog to recover.
+
+Add a self-healing clear: enable_amdv(0) calls amdv_clear_vsif_hold(), which
+drops both the hold request and the active latch. A disc-session segment swap
+keeps the core enabled and never calls enable_amdv(0), so the hold still
+survives the gaps it was written for; only a genuine full teardown clears it.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -186,8 +186,22 @@
+ static bool dolby_vision_vsif_hold;
+ static bool vsif_hold_active;
+ module_param(dolby_vision_vsif_hold, bool, 0664);
+ MODULE_PARM_DESC(dolby_vision_vsif_hold, "\n dolby_vision_vsif_hold\n");
++
++/* Self-healing release for the disc-session VSIF hold: called from
++ * enable_amdv(0) so a full DV-core teardown (return-to-GUI / stop) is never
++ * left with the hold latched when userspace failed to clear it (player crash or
++ * abnormal exit). A stuck hold otherwise swallows the DOVI->SDR teardown and
++ * leaves BT.2020 + the Dolby VSIF signalled over SDR/GUI pixels.
++ */
++void amdv_clear_vsif_hold(void)
++{
++	if (dolby_vision_vsif_hold)
++		pr_dv_dbg("clear stale VSIF hold at DV teardown (holder missed release)\n");
++	dolby_vision_vsif_hold = false;
++	vsif_hold_active = false;
++}
+
+ static bool amdv_efuse_bypass;
+ module_param(amdv_efuse_bypass, bool, 0664);
+ MODULE_PARM_DESC(amdv_efuse_bypass, "\n amdv_efuse_bypass\n");
+--- a/drivers/media/enhancement/amdolby_vision/amdv.h
++++ b/drivers/media/enhancement/amdolby_vision/amdv.h
+@@ -799,6 +799,7 @@
+ extern bool force_stb_mode;
+ extern unsigned int debug_dolby;
+ extern unsigned int dolby_vision_flags;
++extern void amdv_clear_vsif_hold(void);
+ extern uint amdv_mask;
+ extern bool dolby_vision_on;
+ extern bool amdv_core1_on;
+--- a/drivers/media/enhancement/amdolby_vision/amdv_hw.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv_hw.c
+@@ -6457,6 +6457,7 @@
+ 	if (!enable) {
+ 		if (dolby_vision_flags & FLAG_TOGGLE_FRAME)
+ 			pr_dv_dbg("clear stale TOGGLE_FRAME at DV teardown (bypass path missed gated clear)\n");
+ 		dolby_vision_flags &= ~FLAG_TOGGLE_FRAME;
++		amdv_clear_vsif_hold();
+ 	}
+ }
