@@ -1,0 +1,88 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: default target min luminance to reference black, fix sink-min-max exponent bugs
+
+Every VS10 conversion that doesn't set amdv_target_min_override (patch
+0001) falls back to the built-in amdv_target_min = 50 (0.005 nit), which
+floors PQ output black at 10-bit code ~77 - visible black crush below
+code ~80 (matches the community black-clip report this fork already
+tracks: proper PLUGE on stock too, VS10-processed output clips wrong).
+Default it to 1 (0.0001 nit) instead, keeping the floor one step above
+reference black at code ~65; amdv_target_min_override still wins outright
+whenever Kodi sets it explicitly.
+
+Also fix two XOR-as-arithmetic bugs in the FLAG_USE_SINK_MIN_MAX sink
+min/max derivation (dv_info->tmin_lum ^ 2 meant to square, not XOR;
+2 ^ (lumi_max >> 5) meant 2 to the power, not XOR) at both call sites
+in the STB control path. The flag is off by default so this doesn't
+change current behaviour, only correctness if it's ever enabled.
+
+Ported from pannal/linux-amlogic@c2c6cc7d0994a60668948ea9436aee083b2e6b2b
+(amlogic-4.9-20 branch, dolby_vision_target_min / dolby_vision_parse_metadata
+in the older amdolby_vision.c naming) onto this fork's CE22 5.15 amdv.c,
+which carries the identical default and the identical bugs at both of its
+sink-min-max sites under different (tmin_lum / amdv_target_min) names.
+Does not port pannal's plain module_param for the base value - this fork
+already exposes the equivalent lever as amdv_target_min_override, and a
+second competing knob would just be confusing.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -389,7 +389,15 @@
+ static u32 probe_mode;
+ static u32 probe_en;
+
+-static unsigned int amdv_target_min = 50; /* 0.0001 */
++/* Default DM target display min luminance, in 0.0001-nit units. 50
++ * (0.005 nit) floors PQ output black at 10-bit code ~77 - visible black
++ * crush below code ~80 - for every VS10 conversion that doesn't set
++ * amdv_target_min_override. 1 (0.0001 nit) keeps the floor at code ~65,
++ * one step above reference black; amdv_target_min_override still wins
++ * when Kodi sets it explicitly (see the ternaries at the control_path
++ * call sites below).
++ */
++static unsigned int amdv_target_min = 1; /* 0.0001 */
+ static unsigned int amdv_target_max[3][3] = {
+ 	{ 4000, 1000, 100 }, /* DV => DV/HDR/SDR */
+ 	{ 1000, 1000, 100 }, /* HDR =>  DV/HDR/SDR */
+@@ -8950,7 +8958,8 @@
+ 					/* Target min luminance = (CV/127)^2 */
+ 					graphic_min =
+ 					amdv_target_min =
+-						(vinfo->vout_device->dv_info->tmin_lum ^ 2)
++						(vinfo->vout_device->dv_info->tmin_lum
++						* vinfo->vout_device->dv_info->tmin_lum)
+ 						* 10000 / (127 * 127);
+ 				}
+ 			}
+@@ -8958,8 +8967,8 @@
+ 			if (vinfo->hdr_info.lumi_max) {
+ 				/* Luminance value = 50 * (2 ^ (CV/32)) */
+ 				graphic_max =
+-				target_lumin_max = 50 *
+-					(2 ^ (vinfo->hdr_info.lumi_max >> 5));
++				target_lumin_max = 50 <<
++					(vinfo->hdr_info.lumi_max >> 5);
+ 				/* Desired Content Min Luminance =*/
+ 				/*	Desired Content Max Luminance*/
+ 				/*	* (CV/255) * (CV/255) / 100	*/
+@@ -10492,7 +10501,8 @@
+ 					/* Target min luminance = (CV/127)^2 */
+ 					graphic_min =
+ 					amdv_target_min =
+-					(vinfo->vout_device->dv_info->tmin_lum ^ 2) *
++					(vinfo->vout_device->dv_info->tmin_lum *
++					vinfo->vout_device->dv_info->tmin_lum) *
+ 					10000 / (127 * 127);
+ 				}
+ 			}
+@@ -10500,8 +10510,8 @@
+ 			if (vinfo->hdr_info.lumi_max) {
+ 				/* Luminance value = 50 * (2 ^ (CV/32)) */
+ 				graphic_max =
+-				target_lumin_max = 50 *
+-					(2 ^ (vinfo->hdr_info.lumi_max >> 5));
++				target_lumin_max = 50 <<
++					(vinfo->hdr_info.lumi_max >> 5);
+ 				/* Desired Content Min Luminance =*/
+ 				/*	Desired Content Max Luminance*/
+ 				/*	* (CV/255) * (CV/255) / 100	*/
