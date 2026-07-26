@@ -1,0 +1,67 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: apply the target-luminance overrides in the multi_control_path site too
+
+Patch 0001 added amdv_target_min_override / amdv_target_max_override and
+wired them into the two p_funcs_stb->control_path call sites. Patch 0006's
+comment then stated the override "still wins when Kodi sets it explicitly
+(see the ternaries at the control_path call sites below)".
+
+That is false on this hardware, and the overrides have never taken effect.
+The shipped CMv4.0-generation dovi.ko exports ONLY multi_control_path -
+there is no `control_path` symbol in the module at all (verified with nm on
+5.15_2.6_dovi_patched_fix_fel.ko). The registration code takes the
+`else if (func->multi_control_path && !p_funcs_stb)` branch and sets
+multi_dv_mode = true, so the LIVE per-frame call is the multi_control_path
+site, where set_target_min_lum / set_target_max_lum were assigned straight
+from amdv_target_min / amdv_target_max[][] with no override ternary. Both
+legacy control_path call sites are unreachable on any box running this
+module generation.
+
+Net effect before this patch: Kodi's DM target min/max settings (the VS10
+target.minlum and display.maxnits levers, written via
+aml_dv_apply_target_overrides) were silently discarded. Patch 0006's change
+to the amdv_target_min DEFAULT did apply - only the override was dead.
+
+Mirror the same ternaries at the multi site and correct the stale comment
+so it points at all three call sites. Behaviour is unchanged whenever the
+override params are 0 (their default, and what Kodi writes for bypass and
+native-DV output).
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -392,8 +392,9 @@
+  * crush below code ~80 - for every VS10 conversion that doesn't set
+  * amdv_target_min_override. 1 (0.0001 nit) keeps the floor at code ~65,
+  * one step above reference black; amdv_target_min_override still wins
+- * when Kodi sets it explicitly (see the ternaries at the control_path
+- * call sites below).
++ * when Kodi sets it explicitly (see the ternaries at all three control
++ * path call sites below - the two legacy control_path ones and the
++ * multi_control_path one, which is the only live site on a CMv4.0 ko).
+  */
+ static unsigned int amdv_target_min = 1; /* 0.0001 */
+ static unsigned int amdv_target_max[3][3] = {
+@@ -10768,13 +10769,21 @@
+ 	new_m_dovi_setting.set_graphic_min_lum = graphic_min;
+ 	new_m_dovi_setting.set_graphic_max_lum = graphic_max * 10000;
+-	new_m_dovi_setting.set_target_min_lum = amdv_target_min;
++	/* amdv_target_min/max_override (patch 0001) must win here too: this is
++	 * the only control-path call site a CMv4.0 dovi.ko ever reaches, since
++	 * such a module exports multi_control_path and no control_path.
++	 */
++	new_m_dovi_setting.set_target_min_lum =
++		amdv_target_min_override ? amdv_target_min_override : amdv_target_min;
+ 	if (vd_path == VD1_PATH || !vf) {//only update for vd1
+-		if (src_format < 0  || src_format >= ARRAY_SIZE(amdv_target_max))
++		if (amdv_target_max_override)
++			new_m_dovi_setting.set_target_max_lum =
++			amdv_target_max_override * 10000;
++		else if (src_format < 0  || src_format >= ARRAY_SIZE(amdv_target_max))
+ 			new_m_dovi_setting.set_target_max_lum =
+ 			amdv_target_max[FORMAT_SDR][dst_format] * 10000;
+ 		else
+ 			new_m_dovi_setting.set_target_max_lum =
+ 			amdv_target_max[src_format][dst_format] * 10000;
+ 	}
+ 	new_m_dovi_setting.input[IPCORE2_ID].video_width = dv_cert_graphic_width;
+ 	new_m_dovi_setting.input[IPCORE2_ID].video_height = dv_cert_graphic_height;
