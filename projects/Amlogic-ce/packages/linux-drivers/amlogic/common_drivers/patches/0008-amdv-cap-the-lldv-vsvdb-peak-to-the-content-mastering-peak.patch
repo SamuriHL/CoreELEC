@@ -1,0 +1,81 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: cap the LLDV VSVDB peak to the content's own mastering peak
+ 
+In low-latency (player-led) Dolby Vision output the DV core takes its target
+peak from the SINK'S VSVDB, not from the set_target_max_lum argument. That is
+why the same title is graded correctly through VS10 HDR10 output - which uses
+amdv_target_max[][] - and wrong in LLDV.
+ 
+Consequence: a display advertising (or being told, via our vsvdb.maxlum
+override) a 3000-nit peak, playing content mastered at ~100 nits, leaves the
+DM with ~30x headroom. It then has essentially nothing to map, and every L2
+trim scales to nothing - reported on-box as a "Positive Lift Offset Trim" test
+pattern showing no lift at all in player-led DV while being correct in HDR10
+output. Confirmed by dropping the injected peak to 100: the lift reappeared.
+ 
+Fix, ported from avdvplus R9 (amdolby_vision.c:5668, its LL-only VSVDB block):
+when low latency is engaged and the source is Dolby Vision, clamp the v2 VSVDB
+maximum-luminance field handed to the control path down to the stream's own
+source_max_pq (the ETSI base block at md_buf[66..67]). Never raises it, so a
+title graded above the panel is unaffected.
+ 
+This edits only new_m_dovi_setting.vsvdb_tbl - the in-memory copy passed to
+multi_control_path. It deliberately does NOT touch force_vsvdb/vsvdb_data:
+that path re-latches the EDID, which blanks the sink for seconds mid-playback
+(the reason Kodi's aml_dv_apply_vsvdb carries a dv_cap liveness guard), and a
+cap that tracks content cannot live there.
+ 
+avdvplus also forces the VSVDB minimum luminance to 0 in this block. That is
+not ported: the panels checked here already advertise min = 0, so it would be
+an untestable no-op, and lifting a non-zero sink black is a separate decision.
+ 
+Only v2 VSVDBs are handled (version field == 2), matching the only format our
+Kodi-side injector understands; v0/v1 blocks are left alone.
+ 
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -11158,4 +11158,44 @@
+ 	new_m_dovi_setting.input[IPCORE2_ID].valid = 1;
+ 
++	/* LLDV: the DM takes its target peak from the sink's VSVDB, so cap it to
++	 * the content's own mastering peak - otherwise low-peak titles get so
++	 * much headroom that the trims map to nothing. Ported from avdvplus R9.
++	 * In-memory table only; never the EDID (that re-latch blanks the sink).
++	 */
++	if (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
++	    new_m_dovi_setting.input[0].src_format == FORMAT_DOVI &&
++	    new_m_dovi_setting.input[0].in_md &&
++	    new_m_dovi_setting.input[0].in_md_size > 67 &&
++	    new_m_dovi_setting.vsvdb_len >= 8) {
++		unsigned char *x = &new_m_dovi_setting.vsvdb_tbl[5];
++		const unsigned char *md =
++			(const unsigned char *)new_m_dovi_setting.input[0].in_md;
++
++		/* v2 only: max_pq = 2055 + 65 * field (bits 7:3) */
++		if (((x[0] >> 5) & 0x07) == 2) {
++			u16 vsvdb_max = 2055 + 65 * (x[2] >> 3);
++			u16 src_max_pq = ((u16)md[66] << 8) | md[67];
++
++			if (src_max_pq && src_max_pq < vsvdb_max) {
++				u16 idx = 0;
++
++				/* round up so the cap never lands below the
++				 * content's own peak
++				 */
++				if (src_max_pq > 2055)
++					idx = (src_max_pq - 2055 + 64) / 65;
++				if (idx > 31)
++					idx = 31;
++				if ((x[2] >> 3) != idx) {
++					x[2] = (x[2] & 0x07) |
++					       ((idx & 0x1F) << 3);
++					if (debug_dolby & 1)
++						pr_dv_dbg("LLDV: vsvdb peak capped to source %u pq (idx %u, was %u pq)\n",
++							  src_max_pq, idx, vsvdb_max);
++				}
++			}
++		}
++	}
++
+ 	if (debug_dolby & 0x400)
+ 		do_gettimeofday(&start);
