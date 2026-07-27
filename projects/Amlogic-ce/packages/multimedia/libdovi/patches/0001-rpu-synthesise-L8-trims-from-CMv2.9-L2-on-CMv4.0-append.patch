@@ -1,0 +1,405 @@
+From: SamuriHL CE22 build
+Subject: [PATCH] rpu: synthesise L8 trims from CMv2.9 L2 on CMv4.0 append
+
+Appending CMv4.0 metadata (dovi_rpu_add_cmv40_safe_default_metadata)
+inserts L3/L9/L254/L11 but no L8. Once L254 marks the RPU as CM v4.0,
+the DM computes its trims from L8 ONLY (see the level8.rs doc comment)
+and ignores the source L2 - so the append silently destroys the
+stream's authored trims (hardware-confirmed: DM tone LUT pinned to the
+neutral curve while the stream's trim_offset ramps).
+
+Add dovi_rpu_add_cmv40_metadata_with_l8_trims: same safe-default append,
+plus one length-10 L8 block synthesised per CMv2.9 L2 target. Trim
+transfer policy, derived from dual-authored (L2+L8, same target) studio
+content: offset/chroma_weight/saturation_gain/ms_weight copy verbatim
+(Dolby's own tools carry them 1:1; negative/unused ms_weight maps to
+neutral 2048); slope/power are engine-dependent v2.9-curve compensation
+and retain only 1/16 of their deviation from neutral (matches the
+studio's own v4.0 values within ~0.5% on the measured sample). The
+target display becomes the nearest preset index in PQ space, so no
+authored L10 is needed; the L8-only fields with no L2 source are
+omitted via length 10.
+Returns 2 = added with L8, 1 = added (no L2), 0 = already CMv4.0,
+-1 = error.
+
+---
+diff --git a/dolby_vision/src/capi.rs b/dolby_vision/src/capi.rs
+index 619492a..b4cc275 100644
+--- a/dolby_vision/src/capi.rs
++++ b/dolby_vision/src/capi.rs
+@@ -476,6 +476,42 @@ pub unsafe extern "C" fn dovi_rpu_add_cmv40_safe_default_metadata(ptr: *mut RpuO
+     }
+ }
+ 
++/// # Safety
++/// The struct pointer must be valid.
++///
++/// Adds default CMv4.0 extension metadata (L3, L9, L11, L254) to the RPU,
++/// plus L8 trim blocks synthesised from the RPU's CMv2.9 L2 trims so the
++/// CM v4.0 DM keeps the authored trims (with no L8 present, a v4.0 DM
++/// ignores the source L2 and the trims fall back to neutral).
++/// Does nothing if CMv4.0 metadata is already present.
++///
++/// Returns 2 if metadata was added with L8 synthesised from L2, 1 if
++/// metadata was added with no L2 trims to carry over, 0 if CMv4.0 was
++/// already present, -1 on error.
++/// If an error occurs, it is logged to RpuOpaque.error.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn dovi_rpu_add_cmv40_metadata_with_l8_trims(ptr: *mut RpuOpaque) -> i32 {
++    if ptr.is_null() {
++        return -1;
++    }
++
++    let opaque = unsafe { &mut *ptr };
++
++    if let Some(rpu) = &mut opaque.rpu {
++        match rpu.add_cmv40_safe_metadata_with_l8_trims() {
++            Ok(ret) => ret as i32,
++            Err(e) => {
++                opaque.error =
++                    CString::new(format!("Failed setting CMv4.0 metadata with L8 trims: {e}"))
++                        .ok();
++                -1
++            }
++        }
++    } else {
++        -1
++    }
++}
++
+ /// # Safety
+ /// The struct pointer must be valid.
+ ///
+diff --git a/dolby_vision/src/rpu/dovi_rpu.rs b/dolby_vision/src/rpu/dovi_rpu.rs
+index b6ff697..16f6881 100644
+--- a/dolby_vision/src/rpu/dovi_rpu.rs
++++ b/dolby_vision/src/rpu/dovi_rpu.rs
+@@ -7,7 +7,9 @@ use bitvec_helpers::{
+ #[cfg(feature = "serde")]
+ use serde::Serialize;
+ 
+-use super::extension_metadata::blocks::{ExtMetadataBlock, ExtMetadataBlockLevel5};
++use super::extension_metadata::blocks::{
++    ExtMetadataBlock, ExtMetadataBlockLevel2, ExtMetadataBlockLevel5,
++};
+ use super::generate::GenerateConfig;
+ use super::profiles::profile81::Profile81;
+ use super::profiles::profile84::Profile84;
+@@ -596,6 +598,43 @@ impl DoviRpu {
+         Ok(ret)
+     }
+ 
++    /// Like [`DoviRpu::add_cmv40_safe_default_metadata`], but additionally
++    /// synthesises L8 trim blocks from the RPU's CMv2.9 L2 trims so the
++    /// CM v4.0 DM keeps the authored trims (in CM v4.0 the DM computes L2
++    /// from L8 and ignores the source L2; with no L8 present the trims fall
++    /// back to neutral). See [`CmV40DmData::default_safe_with_l8_from_l2`].
++    ///
++    /// Returns:
++    /// - `Ok(0)` if CMv4.0 metadata was already present (nothing changed)
++    /// - `Ok(1)` if metadata was added with no L2 trims to carry over
++    /// - `Ok(2)` if metadata was added with L8 blocks synthesised from L2
++    pub fn add_cmv40_safe_metadata_with_l8_trims(&mut self) -> Result<u8> {
++        let Some(vdr_dm_data) = self.vdr_dm_data.as_mut() else {
++            return Ok(0);
++        };
++
++        if vdr_dm_data.cmv40_metadata.is_some() {
++            return Ok(0);
++        }
++
++        let l2_blocks: Vec<ExtMetadataBlockLevel2> = vdr_dm_data
++            .level_blocks_iter(2)
++            .filter_map(|b| match b {
++                ExtMetadataBlock::Level2(l2) => Some(l2.clone()),
++                _ => None,
++            })
++            .collect();
++
++        self.modified = true;
++        let _ = vdr_dm_data
++            .cmv40_metadata
++            .insert(DmData::V40(CmV40DmData::default_safe_with_l8_from_l2(
++                &l2_blocks,
++            )));
++
++        Ok(if l2_blocks.is_empty() { 1 } else { 2 })
++    }
++
+     pub fn remove_cmv40_extension_metadata(&mut self) -> Result<()> {
+         if let Some(vdr_dm_data) = self.vdr_dm_data.as_mut()
+             && vdr_dm_data.cmv40_metadata.is_some()
+diff --git a/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs b/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs
+index 8b1a2c8..756d542 100644
+--- a/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs
++++ b/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs
+@@ -6,7 +6,21 @@ use bitvec_helpers::{
+ #[cfg(feature = "serde")]
+ use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
+ 
+-use super::{ExtMetadataBlock, ExtMetadataBlockInfo, MAX_12_BIT_VALUE};
++use super::{ExtMetadataBlock, ExtMetadataBlockInfo, ExtMetadataBlockLevel2, MAX_12_BIT_VALUE};
++use crate::utils::nits_to_pq_12_bit;
++
++/// Preset target displays with a known peak brightness, usable in L8
++/// without an authored L10 block: subset of
++/// [`super::level10::PRESET_TARGET_DISPLAYS`], one index per distinct
++/// brightness (see [`ExtMetadataBlockLevel8::trim_target_nits`]).
++const PRESET_TRIM_TARGETS: &[(u8, u16)] = &[
++    (1, 100),
++    (16, 48),
++    (42, 108),
++    (27, 600),
++    (48, 1000),
++    (37, 2000),
++];
+ 
+ /// Creative intent trim passes per target display peak brightness
+ /// For CM v4.0, L8 metadata only is present and used to compute L2
+@@ -160,6 +174,63 @@ impl ExtMetadataBlockLevel8 {
+             _ => 100,
+         }
+     }
++
++    /// Returns the preset target display index whose peak brightness is
++    /// closest (in 12-bit PQ space) to the given L2 `target_max_pq`.
++    pub fn preset_target_index_for_pq(target_max_pq: u16) -> u8 {
++        PRESET_TRIM_TARGETS
++            .iter()
++            .min_by_key(|(_, nits)| {
++                (nits_to_pq_12_bit(*nits) as i32 - target_max_pq as i32).abs()
++            })
++            .map(|(index, _)| *index)
++            .unwrap()
++    }
++
++    /// Synthesises an L8 trim block from a CMv2.9 L2 trim block, so that a
++    /// CM v4.0 DM (which computes L2 from L8 and ignores the source L2)
++    /// keeps the authored trims.
++    ///
++    /// The six core trims share the same 12-bit encoding (2048 = neutral).
++    /// `trim_offset`, `trim_chroma_weight`, `trim_saturation_gain` and
++    /// `ms_weight` copy over unchanged - on dual-authored (L2+L8, same
++    /// target) studio content Dolby's own tools carry these verbatim. A
++    /// negative (unused) L2 `ms_weight` maps to neutral.
++    ///
++    /// `trim_slope` and `trim_power` are ENGINE-DEPENDENT: they mostly
++    /// compensate the CM v2.9 tone curve, and the v4.0 curve does not need
++    /// that compensation - on the same dual-authored content the studio's
++    /// v4.0 values sit near neutral (studio retained ~3% of the slope and
++    /// ~9% of the power deviation). Carrying them verbatim over-corrects
++    /// through the v4.0 engine, so only 1/16 of their deviation from
++    /// neutral is retained (direction preserved, magnitude collapsed;
++    /// within ~0.5% of the studio's actual L8 on the measured sample).
++    ///
++    /// The block is created at length 10, omitting the L8-only fields
++    /// (`target_mid_contrast`, `clip_trim`, vectors) that have no L2
++    /// source. The target display becomes the nearest preset index, so no
++    /// L10 block is required.
++    pub fn from_cmv29_level2(l2: &ExtMetadataBlockLevel2) -> Self {
++        // retain 1/16 of the deviation from neutral (see doc comment)
++        const NEUTRAL: i32 = 2048;
++        let attenuate = |v: u16| (NEUTRAL + (v as i32 - NEUTRAL) / 16) as u16;
++
++        Self {
++            length: 10,
++            target_display_index: Self::preset_target_index_for_pq(l2.target_max_pq),
++            trim_slope: attenuate(l2.trim_slope),
++            trim_offset: l2.trim_offset,
++            trim_power: attenuate(l2.trim_power),
++            trim_chroma_weight: l2.trim_chroma_weight,
++            trim_saturation_gain: l2.trim_saturation_gain,
++            ms_weight: if l2.ms_weight < 0 {
++                2048
++            } else {
++                l2.ms_weight as u16
++            },
++            ..Default::default()
++        }
++    }
+ }
+ 
+ impl ExtMetadataBlockInfo for ExtMetadataBlockLevel8 {
+diff --git a/dolby_vision/src/rpu/extension_metadata/cmv40.rs b/dolby_vision/src/rpu/extension_metadata/cmv40.rs
+index 0c68252..1a8fd92 100644
+--- a/dolby_vision/src/rpu/extension_metadata/cmv40.rs
++++ b/dolby_vision/src/rpu/extension_metadata/cmv40.rs
+@@ -193,6 +193,46 @@ impl CmV40DmData {
+         }
+     }
+ 
++    /// Creates CMv4.0 DM data with the default static blocks (as
++    /// [`CmV40DmData::default_safe`]) plus L8 trim blocks synthesised from
++    /// the given CMv2.9 L2 trim blocks, so the v4.0 DM keeps the authored
++    /// trims (in CM v4.0 the DM computes L2 from L8; with no L8 present the
++    /// trims fall back to neutral).
++    ///
++    /// Each L2 target maps to the nearest preset target display; when two L2
++    /// blocks land on the same preset, the closer one (in PQ space) wins. At
++    /// most 5 L8 blocks are created, as the spec allows.
++    pub fn default_safe_with_l8_from_l2(l2_blocks: &[ExtMetadataBlockLevel2]) -> Self {
++        use crate::utils::nits_to_pq_12_bit;
++
++        // (target_display_index, PQ distance, block), nearest target wins
++        let mut chosen: Vec<(u8, u32, ExtMetadataBlockLevel8)> = Vec::new();
++
++        for l2 in l2_blocks {
++            let l8 = ExtMetadataBlockLevel8::from_cmv29_level2(l2);
++            let dist = (nits_to_pq_12_bit(l8.trim_target_nits()) as i32
++                - l2.target_max_pq as i32)
++                .unsigned_abs();
++
++            match chosen
++                .iter_mut()
++                .find(|(index, ..)| *index == l8.target_display_index)
++            {
++                Some(entry) if dist < entry.1 => *entry = (l8.target_display_index, dist, l8),
++                Some(_) => {}
++                None => chosen.push((l8.target_display_index, dist, l8)),
++            }
++        }
++
++        let mut dm_data = Self::default_safe();
++
++        for (_, _, l8) in chosen.iter().take(5) {
++            dm_data.replace_level8_block(l8);
++        }
++
++        dm_data
++    }
++
+     pub fn new_with_custom_l254(level254: &ExtMetadataBlockLevel254) -> Self {
+         Self {
+             num_ext_blocks: 1,
+@@ -200,3 +240,131 @@ impl CmV40DmData {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::utils::nits_to_pq_12_bit;
++
++    #[test]
++    fn preset_target_index_nearest_in_pq() {
++        assert_eq!(
++            ExtMetadataBlockLevel8::preset_target_index_for_pq(nits_to_pq_12_bit(100u16)),
++            1
++        );
++        assert_eq!(
++            ExtMetadataBlockLevel8::preset_target_index_for_pq(nits_to_pq_12_bit(600u16)),
++            27
++        );
++        assert_eq!(
++            ExtMetadataBlockLevel8::preset_target_index_for_pq(nits_to_pq_12_bit(1000u16)),
++            48
++        );
++        // extremes clamp to the dimmest/brightest presets
++        assert_eq!(ExtMetadataBlockLevel8::preset_target_index_for_pq(0), 16);
++        assert_eq!(ExtMetadataBlockLevel8::preset_target_index_for_pq(4095), 37);
++    }
++
++    #[test]
++    fn l8_from_l2_copies_trims() {
++        let l2 = ExtMetadataBlockLevel2 {
++            target_max_pq: 2081,
++            trim_slope: 2000,
++            trim_offset: 4095,
++            trim_power: 2100,
++            trim_chroma_weight: 2047,
++            trim_saturation_gain: 2020,
++            ms_weight: -1,
++        };
++
++        let l8 = ExtMetadataBlockLevel8::from_cmv29_level2(&l2);
++        l8.validate().unwrap();
++
++        assert_eq!(l8.length, 10);
++        assert_eq!(l8.target_display_index, 1);
++        // engine-dependent slope/power: 1/16 of the deviation retained
++        assert_eq!(l8.trim_slope, 2045); // 2048 + (2000-2048)/16
++        assert_eq!(l8.trim_power, 2051); // 2048 + (2100-2048)/16
++        // offset/chroma/saturation copy verbatim
++        assert_eq!(l8.trim_offset, 4095);
++        assert_eq!(l8.trim_chroma_weight, 2047);
++        assert_eq!(l8.trim_saturation_gain, 2020);
++        // unused (negative) L2 ms_weight maps to neutral
++        assert_eq!(l8.ms_weight, 2048);
++
++        let l2_used_ms = ExtMetadataBlockLevel2 {
++            ms_weight: 1000,
++            ..l2
++        };
++        assert_eq!(
++            ExtMetadataBlockLevel8::from_cmv29_level2(&l2_used_ms).ms_weight,
++            1000
++        );
++    }
++
++    #[test]
++    fn default_safe_with_l8_no_l2_matches_default_safe() {
++        let dm_data = CmV40DmData::default_safe_with_l8_from_l2(&[]);
++        assert_eq!(dm_data.num_ext_blocks(), 4);
++        assert!(dm_data.blocks_ref().iter().all(|b| b.level() != 8));
++        dm_data.validate().unwrap();
++    }
++
++    #[test]
++    fn default_safe_with_l8_one_block_per_target() {
++        let l2_blocks: Vec<ExtMetadataBlockLevel2> = [100u16, 600, 1000]
++            .iter()
++            .map(|nits| ExtMetadataBlockLevel2 {
++                target_max_pq: nits_to_pq_12_bit(*nits),
++                ..Default::default()
++            })
++            .collect();
++
++        let dm_data = CmV40DmData::default_safe_with_l8_from_l2(&l2_blocks);
++        dm_data.validate().unwrap();
++        assert_eq!(dm_data.num_ext_blocks(), 7);
++
++        let l8_indexes: Vec<u8> = dm_data
++            .blocks_ref()
++            .iter()
++            .filter_map(|b| match b {
++                ExtMetadataBlock::Level8(l8) => Some(l8.target_display_index),
++                _ => None,
++            })
++            .collect();
++        assert_eq!(l8_indexes, vec![1, 27, 48]);
++    }
++
++    #[test]
++    fn default_safe_with_l8_nearest_wins_on_same_target() {
++        // both L2 targets land on the 100-nit preset; the closer one wins
++        let exact = ExtMetadataBlockLevel2 {
++            target_max_pq: nits_to_pq_12_bit(100u16),
++            trim_offset: 3000,
++            ..Default::default()
++        };
++        let near = ExtMetadataBlockLevel2 {
++            target_max_pq: nits_to_pq_12_bit(98u16),
++            trim_offset: 1000,
++            ..Default::default()
++        };
++
++        for order in [[&exact, &near], [&near, &exact]] {
++            let l2_blocks: Vec<ExtMetadataBlockLevel2> =
++                order.iter().map(|b| (*b).clone()).collect();
++            let dm_data = CmV40DmData::default_safe_with_l8_from_l2(&l2_blocks);
++
++            let l8_blocks: Vec<&ExtMetadataBlockLevel8> = dm_data
++                .blocks_ref()
++                .iter()
++                .filter_map(|b| match b {
++                    ExtMetadataBlock::Level8(l8) => Some(l8),
++                    _ => None,
++                })
++                .collect();
++            assert_eq!(l8_blocks.len(), 1);
++            assert_eq!(l8_blocks[0].target_display_index, 1);
++            assert_eq!(l8_blocks[0].trim_offset, 3000);
++        }
++    }
++}
