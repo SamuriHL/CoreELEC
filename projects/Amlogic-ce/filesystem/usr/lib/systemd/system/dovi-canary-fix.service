@@ -1,0 +1,13 @@
+[Unit]
+Description=Correct dovi.ko stack-canary offset before the DV module is loaded
+After=local-fs.target
+Before=opentee_linuxdriver.service
+ConditionPathExists=/usr/lib/coreelec/dovi-canary-fix.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/bin/sh /usr/lib/coreelec/dovi-canary-fix.sh
+
+[Install]
+WantedBy=multi-user.target
