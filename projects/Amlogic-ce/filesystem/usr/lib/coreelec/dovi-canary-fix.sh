@@ -48,6 +48,10 @@ if [ ! -s "$TMP" ]; then
     exit 0
 fi
 if mount --bind "$TMP" "$SRC"; then
+    # Record where we mounted so dovi-canary-cleanup can drop it again once the
+    # loader has run - leaving it up all session shadows the real file from
+    # every tool that reads that path.
+    echo "$SRC" > /run/dovi-canary-fix.mnt 2>/dev/null
     log "corrected module bind-mounted over $SRC (RAM only, not persisted)"
 else
     log "bind mount over $SRC failed - loader will use it unchanged"
