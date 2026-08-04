@@ -1,0 +1,13 @@
+[Unit]
+Description=Drop the dovi.ko bind mount once the DV module is loaded
+After=opentee_linuxdriver.service
+Before=kodi.service
+ConditionPathExists=/usr/lib/coreelec/dovi-canary-cleanup.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/bin/sh /usr/lib/coreelec/dovi-canary-cleanup.sh
+
+[Install]
+WantedBy=multi-user.target
