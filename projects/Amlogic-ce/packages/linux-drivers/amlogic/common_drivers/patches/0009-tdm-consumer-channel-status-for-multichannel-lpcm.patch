@@ -1,0 +1,83 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: tdm: use consumer IEC60958 channel status for multi-channel LPCM
+
+Multi-channel LPCM hardcoded its IEC60958 channel status (0x15/0x55/0xfa/
+0x32) instead of using the computed one. Byte 0 bit 0 is the professional/
+consumer flag, so every 5.1/7.1 PCM stream declared IEC60958 PROFESSIONAL
+mode over a consumer HDMI link; byte 2 carried channel 0xf / source 0xa.
+
+The L-PCM audio InfoFrame sets coding type 0, "refer to stream header",
+which points the sink at the channel status. An AVR that honours it
+declines to decode the stream as consumer multi-channel and falls back to
+stereo - even though the InfoFrame itself is correct. Verified on an Ugoos
+AM9 Pro (S6): CC=6, CA=0x0B, AUD_MODE=0x70, I2S_IN_MAP=0x24,
+AUDP_TXCTRL=0x02 and TDMOUT-B lane masks all 0x3, yet the AVR reported 2.0.
+
+Confirmed by writing the registers on a live 6-channel stream, in both
+directions and with a no-op control:
+
+  fresh stream, hardcoded 0x15/0x55/0xfa/0x32 -> AVR 2.0
+  no-op write (0x15 -> 0x15)                  -> AVR 2.0
+  write 0x00/0x01/0x10/0x02                   -> AVR 5.1
+  repeat of the above                         -> AVR 5.1
+  fresh stream, driver rewrites hardcoded     -> AVR 2.0
+
+Which of the four bytes the sink objects to was not isolated; the change
+restores all of them to the values the consumer PCM path already produces.
+
+The status cannot be computed from the stream's own codec type:
+codec_is_raw() counts AUD_CODEC_TYPE_MULTI_LPCM as raw, so
+iec_get_channel_status_info() returns compressed-audio status with
+IEC958_AES0_NONAUDIO set, which mutes the stream outright. Compute it as
+AUD_CODEC_TYPE_STEREO_PCM instead - the consumer PCM branch, which yields
+0x00/0x01/0x10/0x02 at 48kHz and, unlike the raw branch, is also correct at
+88.2/96/176.4/192kHz and derives word length from the sample depth.
+codec_type itself is left intact for the channel mask and event type.
+
+Confined to the I2S->HDMITX path on hdmitx21: set_aud_param_ch_status() is
+static with one call site, SPDIF and eARC compute their own status, and
+hdmitx20 never reads aud_param->status[] (so this is a no-op on G12B).
+
+--- a/sound/soc/amlogic/auge/tdm.c	2026-08-05 18:22:52.916525262 -0400
++++ b/sound/soc/amlogic/auge/tdm.c	2026-08-05 18:37:00.249919934 -0400
+@@ -1811,12 +1811,6 @@
+ 	struct aud_para *aud_param, enum aud_codec_types codec_type)
+ {
+ 	switch (codec_type) {
+-		case AUD_CODEC_TYPE_MULTI_LPCM:
+-			aud_param->status[0] = 0x15;
+-			aud_param->status[1] = 0x55;
+-			aud_param->status[2] = 0xfa;
+-			aud_param->status[3] = 0x32;
+-			break;
+ 		default:
+ 			aud_param->status[0] = chsts->chstat0_l & 0xff;
+ 			aud_param->status[1] = (chsts->chstat0_l >> 8) & 0xff;
+@@ -2013,6 +2007,7 @@
+ 		/* i2s source to hdmix */
+ 		if (get_hdmitx_audio_src(rtd->card) > HDMITX_SRC_SPDIF) {
+ 			enum aud_codec_types codec_type = get_i2s2hdmitx_audio_format(rtd->card);
++			enum aud_codec_types cs_codec_type;
+ 			int i2s_out_data_lane_mask = get_hdmitx_i2s_mask(rtd->card);
+ 			unsigned int event_type = 0;
+ 			struct iec958_chsts chsts;
+@@ -2067,7 +2062,18 @@
+ 				event_type = AOUT_EVENT_RAWDATA_DTS_HD_MA;
+ 			else
+ 				event_type = AOUT_EVENT_IEC_60958_PCM;
+-			iec_get_channel_status_info(&chsts, codec_type,
++			/* Multi-channel LPCM is consumer PCM, but codec_is_raw()
++			 * counts it as raw, so computing the channel status with its
++			 * own codec type returns compressed-audio status (NONAUDIO
++			 * set, category DVD) and the sink mutes the stream. Compute
++			 * it as stereo PCM - the consumer PCM path, which also gets
++			 * every sample rate and the word length right - while leaving
++			 * codec_type itself intact for the channel mask and event
++			 * type above.
++			 */
++			cs_codec_type = (codec_type == AUD_CODEC_TYPE_MULTI_LPCM) ?
++				AUD_CODEC_TYPE_STEREO_PCM : codec_type;
++			iec_get_channel_status_info(&chsts, cs_codec_type,
+ 				runtime->rate, bit_depth, 0);
+ 			set_aud_param_ch_status(&chsts, &aud_param, codec_type);
+ 			aout_notifier_call_chain(event_type, &aud_param);
