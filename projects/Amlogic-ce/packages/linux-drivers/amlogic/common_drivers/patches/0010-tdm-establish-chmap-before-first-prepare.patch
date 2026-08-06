@@ -1,0 +1,339 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: tdm: establish the ALSA channel map before the first prepare
+
+The HDMI Audio InfoFrame for multi-channel LPCM was transmitted with
+channel_allocation = 0 ("FL, FR") for a window at every stream start,
+while 6/8-channel audio was already flowing. A sink that latches the
+first InfoFrame then decodes the whole title as stereo. The window
+length tracks Kodi's videoscreen.delayrefreshchange setting, so it is
+configuration-dependent and can reach seconds.
+
+Cause: aml_dai_tdm_prepare() sends the hdmitx audio notify BEFORE it
+creates the chmap kcontrol. alsa-lib's snd_pcm_set_chmap() (issued by
+Kodi between hw_params and prepare) silently no-ops while the control
+does not exist, so the first notify of every stream carries
+chmap_layout 0. The control is also destroyed on every playback stop
+(commit 221098d0d), so the same happens after every sink rebuild and
+XRUN recovery.
+
+Fix:
+- create the chmap control at .open, before userspace negotiates, so
+  the layout is established when the first prepare sends the notify;
+- keep the negotiated layout in struct aml_tdm with an explicit valid
+  flag - layout 0 is a legal allocation (2.0), so it cannot double as
+  "not established"; only a negotiated layout is ever asserted on the
+  wire. Passthrough and unrecognised speaker maps keep CA = 0 exactly
+  as before; nothing is derived from the channel count (the table's
+  only 4-channel row is 3.1, so deriving would assert 4.0 as 3.1);
+- clear the stored layout at open, the real stream boundary, which
+  preserves what the stop-time removal was protecting against (a 5.1
+  layout leaking into a following stereo or AC3 title via the shared
+  CT_PCM InfoFrame path) without depending on it;
+- re-attach the control in prepare only as a fallback for a control
+  torn down mid-open (XRUN recovery);
+- at prepare, assert the stored layout only when its
+  channel_allocations[] row matches the stream's current channel
+  count, so a client re-running hw_params on one handle can never
+  transmit a stale CA (CC=2/CA=0x0b would be the mirror image of the
+  bug this fixes);
+- guard aml_dai_tdm_chmap_ctl_put() against a closed or unconfigured
+  PCM. The control now outlives the stream by design - an enumeration
+  open that never starts leaves it registered on a closed PCM - and
+  the put dereferenced substream->runtime, so an unprivileged control
+  write (amixer cset) on an idle device was a NULL dereference. Same
+  guard as the HDA chmap implementation;
+- take the card controls write lock around the stop-time
+  snd_ctl_remove(), per its documented contract; the dai-links are
+  nonatomic so the trigger may sleep.
+
+Also fixed as side effects of moving the state into struct aml_tdm:
+the per-stop leak of the kzalloc'd aml_chmap, re-initialisation of a
+live mutex on every re-create, and the uninitialised
+matches/matched_layout read in the chmap put when the channel count
+matches no table entry. The notify log line gains chmap_layout so the
+wire value is visible in the journal.
+
+On-box criterion: sampling hdmitx_pkt_dump from playback start, no
+sample may show channel_count != 2 with channel_allocation = 0; every
+6-channel LPCM notify in the journal must read chmap_layout:0xb.
+Stereo and AC3/DTS passthrough must keep CA = 0.
+
+--- a/sound/soc/amlogic/auge/tdm_hw.h
++++ b/sound/soc/amlogic/auge/tdm_hw.h
+@@ -73,6 +73,11 @@
+ struct aml_chmap {
+ 	struct mutex chmap_lock;
+ 	int chmap_layout;
++	/* Layout 0 is a valid channel allocation (2.0), so it cannot also
++	 * mean "not established yet". Only assert a channel allocation on
++	 * the HDMI Audio InfoFrame once userspace has negotiated one.
++	 */
++	bool valid;
+ };
+ 
+ void aml_tdm_enable(struct aml_audio_controller *actrl,
+--- a/sound/soc/amlogic/auge/tdm.c
++++ b/sound/soc/amlogic/auge/tdm.c
+@@ -189,8 +189,17 @@
+ 	bool earc_use_48k;
+ 	int ext_amp_ws_inv;
+ 	unsigned int tdmout_master;
++	/* ALSA channel-map state. Kept here rather than in the chmap
++	 * kcontrol's private data because aml_soc_tdm_trigger() destroys
++	 * that control on every playback stop, while the negotiated layout
++	 * has to survive until the next open.
++	 */
++	struct aml_chmap chmap;
+ };
+ 
++static int aml_dai_tdm_chmap_ctl_create(struct snd_pcm_substream *substream,
++					struct aml_tdm *p_tdm);
++
+ #define to_aml_tdm(x)   container_of(x, struct aml_tdm, clk_nb)
+ #define TDM_BUFFER_BYTES (512 * 1024 * 2)
+ static const struct snd_pcm_hardware aml_tdm_hardware = {
+@@ -1446,6 +1455,20 @@
+ 			dev_err(dev, "failed to claim from ddr\n");
+ 			goto err_ddr;
+ 		}
++		/* Create the channel map control here, and drop any layout
++		 * left over from the previous stream. alsa-lib runs
++		 * snd_pcm_query_chmaps() and snd_pcm_set_chmap() between
++		 * open and prepare, and both no-op silently when the control
++		 * does not exist, so this is the last point at which
++		 * userspace can still establish a layout before .prepare
++		 * sends the HDMI Audio InfoFrame.
++		 */
++		mutex_lock(&p_tdm->chmap.chmap_lock);
++		p_tdm->chmap.chmap_layout = 0;
++		p_tdm->chmap.valid = false;
++		mutex_unlock(&p_tdm->chmap.chmap_lock);
++		if (aml_dai_tdm_chmap_ctl_create(substream, p_tdm) < 0)
++			dev_warn(dev, "failed to add channel map control\n");
+ 	} else {
+ 		p_tdm->tddr = aml_audio_register_toddr(dev,
+ 			aml_tdm_ddr_isr, substream);
+@@ -1916,8 +1939,19 @@
+ 	unsigned int idx = snd_ctl_get_ioffidx(kcontrol, &ucontrol->id);
+ 	struct snd_pcm_substream *substream = snd_pcm_chmap_substream(info, idx);
+ 	struct aml_chmap *prtd = info->private_data;
+-	struct snd_pcm_runtime *runtime = substream->runtime;
+-	int res = 0, channel, layout, matches, matched_layout;
++	struct snd_pcm_runtime *runtime;
++	int res = 0, channel, layout, matches = 0, matched_layout = 0;
++
++	/* The control now outlives the stream: it is attached at open, and
++	 * the PCM can be closed again - runtime freed - with the control
++	 * still registered (an enumeration open that never started leaves
++	 * exactly that). Reject writes without a configured runtime, as the
++	 * HDA chmap implementation does, or an unprivileged control write
++	 * on an idle device dereferences NULL.
++	 */
++	if (!substream || !substream->runtime || !substream->runtime->channels)
++		return -EBADFD;
++	runtime = substream->runtime;
+ 
+ 	if (mutex_lock_interruptible(&prtd->chmap_lock))
+ 		return -EINTR;
+@@ -1954,6 +1988,7 @@
+ 	pr_info("Setting a %d channel layout matching layout #%d\n", runtime->channels, matched_layout);
+ 
+ 	prtd->chmap_layout = matched_layout;
++	prtd->valid = true;
+ 
+ 	mutex_unlock(&prtd->chmap_lock);
+ 	return res;
+@@ -1975,17 +2010,49 @@
+ 	return NULL;
+ }
+ 
++/* Attach the channel map control to this PCM unless it is attached already.
++ * Safe to call more than once; aml_soc_tdm_trigger() tears the control down
++ * again on stop.
++ */
++static int aml_dai_tdm_chmap_ctl_create(struct snd_pcm_substream *substream,
++					struct aml_tdm *p_tdm)
++{
++	struct snd_pcm_chmap *chmap;
++	struct snd_pcm_chmap *info;
++	struct snd_kcontrol *kctl;
++	int ret, i;
++
++	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return 0;
++	if (aml_dai_tdm_chmap_kctrl_get(substream))
++		return 0;
++
++	ret = snd_pcm_add_chmap_ctls(substream->pcm, SNDRV_PCM_STREAM_PLAYBACK,
++				     NULL, 8, 0, &chmap);
++	if (ret < 0)
++		return ret;
++
++	kctl = chmap->kctl;
++	for (i = 0; i < kctl->count; i++)
++		kctl->vd[i].access |= SNDRV_CTL_ELEM_ACCESS_WRITE;
++
++	kctl->get = aml_dai_tdm_chmap_ctl_get;
++	kctl->put = aml_dai_tdm_chmap_ctl_put;
++	kctl->tlv.c = aml_dai_tdm_chmap_ctl_tlv;
++
++	info = snd_kcontrol_chip(kctl);
++	info->private_data = &p_tdm->chmap;
++
++	return 0;
++}
++
+ static int aml_dai_tdm_prepare(struct snd_pcm_substream *substream,
+ 			       struct snd_soc_dai *cpu_dai)
+ {
+-	int ret = 0, i;
++	int ret = 0;
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+ 	struct aml_tdm *p_tdm = snd_soc_dai_get_drvdata(cpu_dai);
+-	struct snd_pcm_chmap *chmap;
+-	struct snd_kcontrol *kctl;
+-	struct snd_pcm_chmap *info;
+-	struct aml_chmap *prtd;
+ 	int bit_depth, separated = 0;
+ 
+ 	bit_depth = snd_pcm_format_width(runtime->format);
+@@ -2038,14 +2105,41 @@
+ 					break;
+ 			}
+ 
+-			if ((kctl = aml_dai_tdm_chmap_kctrl_get(substream)) != NULL)
+-			{
+-				if ((info = snd_kcontrol_chip(kctl)) != NULL)
+-				{
+-					prtd = info->private_data;
+-					aud_param.chmap_layout = prtd->chmap_layout;
++			/* Assert a channel allocation only if userspace has
++			 * negotiated one. The presence of the kcontrol is not
++			 * a proxy for that: it is created with layout 0 and
++			 * is destroyed again on every stop. Do not derive CA
++			 * from the channel count either - channel_allocations[]
++			 * has a single 4-channel row (3.1), so 4.0 would be
++			 * asserted as 3.1 and the rears routed to centre/LFE,
++			 * and 3/5/7 channels have no row at all.
++			 *
++			 * Cross-check the stored layout against the stream's
++			 * current channel count: a client may re-run hw_params
++			 * on the same handle without renegotiating the map,
++			 * and a stale 5.1 layout on a 2-channel stream would
++			 * transmit CC=2/CA=0x0b - the mirror image of the bug
++			 * this exists to fix. Never assert a layout whose row
++			 * does not match what is actually being sent.
++			 */
++			mutex_lock(&p_tdm->chmap.chmap_lock);
++			if (p_tdm->chmap.valid) {
++				int ca_i;
++
++				for (ca_i = 0; ca_i < ARRAY_SIZE(channel_allocations); ca_i++) {
++					struct channel_speaker_allocation *row =
++						&channel_allocations[ca_i];
++
++					if (row->chmap_layout ==
++						p_tdm->chmap.chmap_layout &&
++					    row->channels == runtime->channels) {
++						aud_param.chmap_layout =
++							p_tdm->chmap.chmap_layout;
++						break;
++					}
+ 				}
+ 			}
++			mutex_unlock(&p_tdm->chmap.chmap_lock);
+ 
+ 			aud_param.aud_src_if = AUD_SRC_IF_I2S;
+ 
+@@ -2110,34 +2204,13 @@
+ 			bit_depth - 1,
+ 			tdmout_get_frddr_type(bit_depth));
+ 		aml_frddr_select_dst(fr, dst);
+-		// Alsa Channel Mapping API handling
+-		if (!aml_dai_tdm_chmap_kctrl_get(substream))
+-		{
+-			ret = snd_pcm_add_chmap_ctls(substream->pcm, SNDRV_PCM_STREAM_PLAYBACK, NULL, 8, 0, &chmap);
+-
+-			if (ret < 0)
+-			{
+-				pr_err("aml_dai_tdm_startup error %d\n", ret);
+-				goto out;
+-			}
+-
+-			kctl = chmap->kctl;
+-			for (i = 0; i < kctl->count; i++)
+-				kctl->vd[i].access |= SNDRV_CTL_ELEM_ACCESS_WRITE;
+-
+-			kctl->get = aml_dai_tdm_chmap_ctl_get;
+-			kctl->put = aml_dai_tdm_chmap_ctl_put;
+-			kctl->tlv.c = aml_dai_tdm_chmap_ctl_tlv;
+-
+-			info = snd_kcontrol_chip(kctl);
+-			prtd = info->private_data;
+-			if (prtd == NULL) {
+-				prtd = (struct aml_chmap*)kzalloc(sizeof(struct aml_chmap), GFP_KERNEL);
+-				info->private_data = prtd;
+-			}
+-			mutex_init(&prtd->chmap_lock);
+-		}
+-	out:
++		/* Alsa Channel Mapping API handling. Normally attached
++		 * already by aml_tdm_open(); this only covers a control torn
++		 * down by a stop inside the same open, e.g. XRUN recovery.
++		 */
++		ret = aml_dai_tdm_chmap_ctl_create(substream, p_tdm);
++		if (ret < 0)
++			pr_err("%s: add chmap ctl error %d\n", __func__, ret);
+ 		return ret;
+ 
+ 	} else {
+@@ -2321,9 +2394,22 @@
+ 
+ 			aml_frddr_enable(p_tdm->fddr, false);
+ 
+-			for (i = 0; i < 2; i++) {
+-				if (substream->pcm->card && substream->pcm->streams[i].chmap_kctl)
+-					snd_ctl_remove(substream->pcm->card, substream->pcm->streams[i].chmap_kctl);
++			/* snd_ctl_remove() requires the card controls write
++			 * lock (see its kerneldoc); the dai-links here are
++			 * nonatomic so the trigger may sleep. Without it this
++			 * removal races a concurrent control write or another
++			 * DAI's open-time snd_ctl_add on the same card.
++			 */
++			if (substream->pcm->card) {
++				struct snd_card *ctl_card = substream->pcm->card;
++
++				down_write(&ctl_card->controls_rwsem);
++				for (i = 0; i < 2; i++) {
++					if (substream->pcm->streams[i].chmap_kctl)
++						snd_ctl_remove(ctl_card,
++							substream->pcm->streams[i].chmap_kctl);
++				}
++				up_write(&ctl_card->controls_rwsem);
+ 			}
+ 		} else {
+ 			bool toddr_stopped = false;
+@@ -2908,6 +2994,7 @@
+ 	p_tdm = devm_kzalloc(dev, sizeof(struct aml_tdm), GFP_KERNEL);
+ 	if (!p_tdm)
+ 		return -ENOMEM;
++	mutex_init(&p_tdm->chmap.chmap_lock);
+ 
+ 	/* match data */
+ 	p_chipinfo = (struct tdm_chipinfo *)
+--- a/drivers/media/vout/hdmitx_common/hdmitx_audio.c
++++ b/drivers/media/vout/hdmitx_common/hdmitx_audio.c
+@@ -798,9 +798,10 @@
+ 		HDMITX_INFO("%s[%d] audio prepare\n", __func__, __LINE__);
+ 		return;
+ 	}
+-	HDMITX_INFO("%s[%d] type:%lu rate:%d size:%d chs:%d i2s_ch_mask:%d aud_src_if:%d\n",
++	HDMITX_INFO("%s[%d] type:%lu rate:%d size:%d chs:%d i2s_ch_mask:%d aud_src_if:%d chmap_layout:0x%x\n",
+ 		__func__, __LINE__, cmd, n_rate, n_size, aud_param->chs,
+-		aud_param->i2s_ch_mask, aud_param->aud_src_if);
++		aud_param->i2s_ch_mask, aud_param->aud_src_if,
++		aud_param->chmap_layout);
+ 	/* no need check audio parameters changing, update hdmitx audio hw */
+ 	hdmitx_set_i2s_mask(tx_aud_param, aud_param->chs, aud_param->i2s_ch_mask);
+ 
