@@ -37,14 +37,23 @@ Fix:
   transmit a stale CA (CC=2/CA=0x0b would be the mirror image of the
   bug this fixes);
 - guard aml_dai_tdm_chmap_ctl_put() against a closed or unconfigured
-  PCM. The control now outlives the stream by design - an enumeration
-  open that never starts leaves it registered on a closed PCM - and
-  the put dereferenced substream->runtime, so an unprivileged control
-  write (amixer cset) on an idle device was a NULL dereference. Same
-  guard as the HDA chmap implementation;
-- take the card controls write lock around the stop-time
-  snd_ctl_remove(), per its documented contract; the dai-links are
-  nonatomic so the trigger may sleep.
+  PCM: it dereferenced substream->runtime, so an unprivileged control
+  write (amixer cset) against an idle device was a NULL dereference.
+  Same guard as the HDA chmap implementation;
+- remove the control in .close rather than in the trigger's
+  STOP/SUSPEND/PAUSE_PUSH branch, so its lifetime is exactly the PCM's.
+  Creating at .open while still destroying on stop left two holes: a
+  PCM opened and closed WITHOUT ever being started - which is what a
+  client's device enumeration does - never reached the trigger, so the
+  control stayed registered on the card with private_data pointing into
+  this TDM's devm allocation (unbind the platform device with the ASoC
+  card still up and a control read touches freed memory); and
+  PAUSE_PUSH removed the control while PAUSE_RELEASE never re-added it,
+  since only .prepare does, so a pause/resume left chmap queries
+  failing for the rest of the stream. Removing at .close closes both
+  and needs no re-create path;
+- take the card controls write lock around that snd_ctl_remove(), per
+  its documented contract.
 
 Also fixed as side effects of moving the state into struct aml_tdm:
 the per-stop leak of the kzalloc'd aml_chmap, re-initialisation of a
@@ -74,7 +83,7 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
  void aml_tdm_enable(struct aml_audio_controller *actrl,
 --- a/sound/soc/amlogic/auge/tdm.c
 +++ b/sound/soc/amlogic/auge/tdm.c
-@@ -189,8 +189,17 @@
+@@ -189,8 +189,18 @@
  	bool earc_use_48k;
  	int ext_amp_ws_inv;
  	unsigned int tdmout_master;
@@ -88,6 +97,7 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
  
 +static int aml_dai_tdm_chmap_ctl_create(struct snd_pcm_substream *substream,
 +					struct aml_tdm *p_tdm);
++static void aml_dai_tdm_chmap_ctl_remove(struct snd_pcm_substream *substream);
 +
  #define to_aml_tdm(x)   container_of(x, struct aml_tdm, clk_nb)
  #define TDM_BUFFER_BYTES (512 * 1024 * 2)
@@ -113,6 +123,15 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
  	} else {
  		p_tdm->tddr = aml_audio_register_toddr(dev,
  			aml_tdm_ddr_isr, substream);
+@@ -1490,6 +1513,8 @@
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct aml_tdm *p_tdm = runtime->private_data;
+ 
++	aml_dai_tdm_chmap_ctl_remove(substream);
++
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+ 		aml_audio_unregister_frddr(p_tdm->dev,
+ 				substream);
 @@ -1916,8 +1939,19 @@
  	unsigned int idx = snd_ctl_get_ioffidx(kcontrol, &ucontrol->id);
  	struct snd_pcm_substream *substream = snd_pcm_chmap_substream(info, idx);
@@ -143,13 +162,14 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
  
  	mutex_unlock(&prtd->chmap_lock);
  	return res;
-@@ -1975,17 +2010,49 @@
+@@ -1975,17 +2010,91 @@
  	return NULL;
  }
  
 +/* Attach the channel map control to this PCM unless it is attached already.
-+ * Safe to call more than once; aml_soc_tdm_trigger() tears the control down
-+ * again on stop.
++ * Safe to call more than once. Torn down again by
++ * aml_dai_tdm_chmap_ctl_remove() at .close, so the control's lifetime is
++ * exactly the PCM's - see the comment there.
 + */
 +static int aml_dai_tdm_chmap_ctl_create(struct snd_pcm_substream *substream,
 +					struct aml_tdm *p_tdm)
@@ -181,6 +201,47 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
 +	info->private_data = &p_tdm->chmap;
 +
 +	return 0;
++}
++
++/* Detach the channel map control. Called from .close so the control's
++ * lifetime brackets the PCM's exactly.
++ *
++ * It used to be torn down in the trigger's STOP/SUSPEND/PAUSE_PUSH branch
++ * instead, which left two holes now that creation happens at .open rather
++ * than .prepare:
++ *
++ *  - A PCM opened and closed WITHOUT ever being started - which is what an
++ *    ALSA client's device enumeration does - never reached the trigger, so
++ *    the control stayed registered on the card with private_data pointing
++ *    into this TDM's devm allocation. Unbind the TDM platform device with
++ *    the ASoC card still up and any control read touches freed memory.
++ *  - PAUSE_PUSH removed the control but PAUSE_RELEASE never re-added it
++ *    (only .prepare does), so a pause/resume left chmap queries failing for
++ *    the rest of the stream.
++ *
++ * Removing here fixes both and needs no re-create path at all.
++ *
++ * snd_ctl_remove() requires the card controls write lock (see its
++ * kerneldoc); .close is process context, so taking it is safe and necessary
++ * against a concurrent control write or another DAI's open-time
++ * snd_ctl_add() on the same card.
++ */
++static void aml_dai_tdm_chmap_ctl_remove(struct snd_pcm_substream *substream)
++{
++	struct snd_card *card;
++	int i;
++
++	if (!substream->pcm || !substream->pcm->card)
++		return;
++
++	card = substream->pcm->card;
++	down_write(&card->controls_rwsem);
++	for (i = 0; i < 2; i++) {
++		if (substream->pcm->streams[i].chmap_kctl)
++			snd_ctl_remove(card,
++				       substream->pcm->streams[i].chmap_kctl);
++	}
++	up_write(&card->controls_rwsem);
 +}
 +
  static int aml_dai_tdm_prepare(struct snd_pcm_substream *substream,
@@ -288,30 +349,21 @@ Stereo and AC3/DTS passthrough must keep CA = 0.
  		return ret;
  
  	} else {
-@@ -2321,9 +2394,22 @@
+@@ -2321,9 +2394,12 @@
  
  			aml_frddr_enable(p_tdm->fddr, false);
  
 -			for (i = 0; i < 2; i++) {
 -				if (substream->pcm->card && substream->pcm->streams[i].chmap_kctl)
 -					snd_ctl_remove(substream->pcm->card, substream->pcm->streams[i].chmap_kctl);
-+			/* snd_ctl_remove() requires the card controls write
-+			 * lock (see its kerneldoc); the dai-links here are
-+			 * nonatomic so the trigger may sleep. Without it this
-+			 * removal races a concurrent control write or another
-+			 * DAI's open-time snd_ctl_add on the same card.
+-			}
++			/* The channel map control is now removed in .close, not
++			 * here - see aml_dai_tdm_chmap_ctl_remove(). Tearing it
++			 * down on STOP/SUSPEND/PAUSE_PUSH left the control absent
++			 * after a pause with nothing to re-add it before the next
++			 * prepare, and never ran at all for a PCM that was opened
++			 * and closed without starting.
 +			 */
-+			if (substream->pcm->card) {
-+				struct snd_card *ctl_card = substream->pcm->card;
-+
-+				down_write(&ctl_card->controls_rwsem);
-+				for (i = 0; i < 2; i++) {
-+					if (substream->pcm->streams[i].chmap_kctl)
-+						snd_ctl_remove(ctl_card,
-+							substream->pcm->streams[i].chmap_kctl);
-+				}
-+				up_write(&ctl_card->controls_rwsem);
- 			}
  		} else {
  			bool toddr_stopped = false;
 @@ -2908,6 +2994,7 @@

@@ -214,7 +214,7 @@ not credit a picture change to this hunk.
  			/* need invert to g,b,r */
  			if (hdr10_data.primaries[0][0] !=
  				((p_hdr->primaries_x_1_msb << 8)
-@@ -7160,37 +7160,108 @@
+@@ -7160,37 +7160,120 @@
  			(p_hdr->white_point_y_msb << 8)
  			| p_hdr->white_point_y_lsb;
  
@@ -302,8 +302,20 @@ not credit a picture change to this hunk.
 +			if (mapped && tgt_max && tgt_max <= 0xffff &&
 +			    tgt_max != max_lum) {
 +				max_lum = tgt_max;
-+				if (tgt_min && tgt_min <= 0xffff)
-+					min_lum = tgt_min;
++				/* Both endpoints must describe the SAME volume.
++				 * Leaving the source's min beside our max is a
++				 * mastering volume that never existed, and the
++				 * range test is not a formality: under
++				 * FLAG_USE_SINK_MIN_MAX, amdv_target_min is
++				 * computed as target_lumin_max * 10000 *
++				 * lumi_min^2 / (255^2 * 100), which both
++				 * overflows u32 for large lumi_min and can
++				 * legitimately exceed this 16-bit field (e.g.
++				 * 640000). When our own min is unusable, say 0 -
++				 * an unknown/zero black for the display we
++				 * mapped to - rather than quoting the source's.
++				 */
++				min_lum = (tgt_min && tgt_min <= 0xffff) ? tgt_min : 0;
 +				tgt_applied = true;
 +			}
 +
