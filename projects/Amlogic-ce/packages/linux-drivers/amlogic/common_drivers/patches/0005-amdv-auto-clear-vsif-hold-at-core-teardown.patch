@@ -36,7 +36,7 @@ survives the gaps it was written for; only a genuine full teardown clears it.
 +	dolby_vision_vsif_hold = false;
 +	vsif_hold_active = false;
 +}
-
+ 
  static bool amdv_efuse_bypass;
  module_param(amdv_efuse_bypass, bool, 0664);
  MODULE_PARM_DESC(amdv_efuse_bypass, "\n amdv_efuse_bypass\n");
