@@ -35,9 +35,36 @@ mastering luminance. CTA-861-H 6.9.1 says a group whose data bytes are all zero
 "shall" be interpreted as unknown, and footnote 19 names this exact case:
 pre-processed content delivered without content-light-level information. So
 zeroing is the standards-blessed way to say "remapped, no longer known" and lets
-the sink fall back to the mastering luminance we do know. Guarded on
-dovi2hdr10_nomapping - in that mode nothing is remapped and the source's own
-values stay the truth.
+the sink fall back to the mastering luminance we do know.
+
+THE SUBSTITUTION IS GUARDED THREE WAYS, and the zeroing only ever happens when
+the substitution actually fired:
+
+- dovi2hdr10_nomapping clear. Nothing is remapped in that mode. Note this is
+  driven by FLAG_DOVI2HDR10_NOMAPPING, a debug bit that is clear by default, so
+  on its own this condition gates nothing in any shipping configuration. It is
+  kept because it is correct, not because it is load-bearing - the two guards
+  below are what actually bound the change.
+- src_format is FORMAT_DOVI or FORMAT_HDR10, i.e. a real HDR video source is
+  being tone-mapped. Without this the substitution also fires for GUI-only /
+  SDR-source HDR10 output (cur_src_format = FORMAT_SDR, g_dst_format =
+  FORMAT_HDR10), where the DM target describes no content at all and the result
+  is a GUI frame advertising "mastered at our target, content light level
+  unknown". This fork has prior HDR10 GUI brightness faults; that path stays out
+  of scope.
+- tgt_max != max_lum, i.e. the substitution changes something. The default table
+  entry is 1000 nits and 1000-nit masters are the common case - including the
+  title measured above - so without this the luminance is rewritten 1000 -> 1000
+  while MaxCLL/MaxFALL are wiped, moving the sink's roll-off knee (LG, DTM off,
+  min(mastering, MaxCLL)) from the real 439 up to 1000 for no corrective benefit
+  whatsoever. That would be strictly worse than leaving the packet alone.
+
+KNOWN INCOMPLETENESS, deliberate: on the LEGACY (non-multi) path the helper
+returns 0 for src_format >= 3, so the fix is a no-op for HLG / HDR10+ / CUVA /
+PRIMESL / MVC sources there - the legacy control_path call sites index
+amdv_target_max[src_format][dst_format] raw and read out of bounds for those
+formats. The helper refuses to reproduce that out-of-bounds read; fixing the
+pre-existing OOB at those call sites is a separate patch.
  
 2. THE MASTERING-DISPLAY PRIMARIES GO OUT ROTATED.
  
@@ -187,7 +214,7 @@ not credit a picture change to this hunk.
  			/* need invert to g,b,r */
  			if (hdr10_data.primaries[0][0] !=
  				((p_hdr->primaries_x_1_msb << 8)
-@@ -7160,37 +7160,82 @@
+@@ -7160,37 +7160,108 @@
  			(p_hdr->white_point_y_msb << 8)
  			| p_hdr->white_point_y_lsb;
  
@@ -240,14 +267,40 @@ not credit a picture change to this hunk.
 +				| p_hdr->max_display_mastering_lum_lsb;
 +			u32 min_lum = (p_hdr->min_display_mastering_lum_msb << 8)
 +				| p_hdr->min_display_mastering_lum_lsb;
-+			bool mapped = multi_dv_mode ?
-+				!m_dovi_setting.dovi2hdr10_nomapping :
-+				!dovi_setting.dovi2hdr10_nomapping;
-+
-+			/* Nothing was remapped in no-mapping mode, so the
-+			 * source's own values remain the truth there.
++			/*
++			 * Three conditions, all required.
++			 *
++			 * dovi2hdr10_nomapping: nothing was remapped in that
++			 * mode, so the source's own values remain the truth.
++			 * Note this is driven by a debug flag that is clear by
++			 * default, so on its own it gates nothing - it is kept
++			 * because it is correct, not because it is load-bearing.
++			 *
++			 * src_format: only an actual HDR video source is being
++			 * tone-mapped. Without this the substitution also fires
++			 * for GUI-only / SDR-source HDR10 output, where the DM
++			 * target has nothing to do with any content and the
++			 * result is a GUI frame advertising "mastered at our
++			 * target, light level unknown". This fork has a history
++			 * of HDR10 GUI brightness faults; keep them out of it.
++			 *
++			 * tgt_max != max_lum: only substitute when it CHANGES
++			 * something. The default table entry is 1000 nits and
++			 * 1000-nit masters are the common case, so without this
++			 * the luminance is rewritten 1000 -> 1000 while
++			 * MaxCLL/MaxFALL below get wiped - moving the sink's
++			 * roll-off knee (LG, DTM off, min(mastering, MaxCLL))
++			 * from the real MaxCLL up to the mastering value for no
++			 * corrective benefit at all.
 +			 */
-+			if (mapped && tgt_max && tgt_max <= 0xffff) {
++			bool mapped = (multi_dv_mode ?
++				!m_dovi_setting.dovi2hdr10_nomapping :
++				!dovi_setting.dovi2hdr10_nomapping) &&
++				(src_format == FORMAT_DOVI ||
++				 src_format == FORMAT_HDR10);
++
++			if (mapped && tgt_max && tgt_max <= 0xffff &&
++			    tgt_max != max_lum) {
 +				max_lum = tgt_max;
 +				if (tgt_min && tgt_min <= 0xffff)
 +					min_lum = tgt_min;
