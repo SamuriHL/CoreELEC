@@ -1,0 +1,303 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: describe our own HDR10 output honestly (mastering luminance +
+ primary order)
+ 
+Two defects in the HDR10 output packet built by send_hdmi_pkt(). Both make the
+box lie to the sink about what it just sent, and both only bite when the DV
+core is used as a tone-mapping engine with an HDR10 wire output (VS10 HDR10) -
+native passthrough is unaffected.
+ 
+1. MASTERING LUMINANCE IS THE SOURCE'S, NOT OURS.
+ 
+hdr_info comes back from the DM (it is the blob's output struct - no GPL code
+writes it) with the source's mastering-display luminance echoed through
+unchanged. Measured on S6 with hdmitx_pkt_dump, playing a 1000-nit-mastered
+title through VS10 HDR10 output:
+ 
+  DM target  400 nits -> DRM max_lum 1000, min 1, max_cll 439, max_fall 106
+  DM target 2607 nits -> DRM max_lum 1000, min 1, max_cll 439, max_fall 106
+  DM target 8000 nits -> DRM max_lum 1000, min 1, max_cll 439, max_fall 106
+ 
+i.e. completely invariant across a 20x sweep of the target. So the box maps the
+picture for an N-nit display and then tells the sink "mastered at 1000", and the
+sink applies its own roll-off against that wrong reference - a second tone map,
+with nothing anywhere in the chain compensating. Substitute the target the DM
+was actually handed. Falls back to the source values when no target is known,
+so any path that has not run a conversion is unchanged.
+ 
+MaxCLL/MaxFALL are ZEROED whenever the mastering luminance is substituted.
+They describe the CONTENT and the DM does not report what it produced, so after
+a remap the source's figures are a known-false statement about the signal on
+the wire rather than merely an unknown one - and they are the binding term on
+the dominant sink rule (LG's documented HDR10 roll-off with DTM off uses
+min(mastering, MaxCLL)), so leaving them silently cancels the corrected
+mastering luminance. CTA-861-H 6.9.1 says a group whose data bytes are all zero
+"shall" be interpreted as unknown, and footnote 19 names this exact case:
+pre-processed content delivered without content-light-level information. So
+zeroing is the standards-blessed way to say "remapped, no longer known" and lets
+the sink fall back to the mastering luminance we do know. Guarded on
+dovi2hdr10_nomapping - in that mode nothing is remapped and the source's own
+values stay the truth.
+ 
+2. THE MASTERING-DISPLAY PRIMARIES GO OUT ROTATED.
+ 
+prepare_hdr10_param() normalises the source's g,b,r primaries into named
+r_x/g_x/b_x fields, with its own comment saying it does so because "DV will swap
+back to GBR in send_hdmi_pkt". That swap existed only on the HDR10+ branch; every
+other source took a positional copy, so r,g,b went out where g,b,r was expected.
+Measured, same title, same frame source:
+ 
+  passthrough : (0.265,0.690) (0.150,0.060) (0.680,0.320)   = G,B,R  correct
+  VS10 HDR10  : (0.680,0.320) (0.265,0.690) (0.150,0.060)   = R,G,B  rotated
+ 
+The destination struct documents the contract the DV path was violating -
+include/linux/amlogic/media/vout/vinfo.h:56 declares
+ 
+	u32 primaries[3][2];		/* normalized 50000 in G,B,R order */
+ 
+and the passthrough producer normalises to that order independently
+(amcsc.c:4013-4023, "RGB -> GBR", rotation (i+2)%3) while hdmitx copies
+positionally. Apply the swap for every source.
+ 
+Expect NO picture change from this on a conforming sink: ANSI/CTA-861-H 6.9.1
+requires sinks to recover the primary order geometrically ("The Red color
+primary corresponds to the index of the largest display_primaries_x[] value"),
+so a rotation is recoverable. It is fixed because the interface contract says
+G,B,R and we were sending R,G,B - not because a symptom was traced to it. Do
+not credit a picture change to this hunk.
+ 
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c	2026-08-06 16:39:14.029736086 -0400
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-08-06 17:26:06.453755812 -0400
+@@ -7007,6 +7007,41 @@
+ /* #define HDMI_SEND_ALL_PKT */
+ static u32 last_dst_format = FORMAT_SDR;
+ 
++/*
++ * The DM target actually handed to the control path for the current conversion,
++ * in the units the HDR10 mastering-display InfoFrame uses: max in nits, min in
++ * 0.0001 nit. On the multi path the committed setting carries it; otherwise the
++ * expression mirrors the legacy control_path call sites. Returns 0 when no
++ * target is known, in which case the caller leaves the source values alone.
++ */
++static u32 amdv_out_target_max_nits(enum signal_format_enum src_format,
++				    enum signal_format_enum dst_format)
++{
++	if (multi_dv_mode)
++		return m_dovi_setting.set_target_max_lum > 0 ?
++			(u32)m_dovi_setting.set_target_max_lum / 10000 : 0;
++
++	if (amdv_target_max_override)
++		return amdv_target_max_override;
++
++	if (src_format < FORMAT_DOVI ||
++	    src_format >= (int)ARRAY_SIZE(amdv_target_max) ||
++	    dst_format < FORMAT_DOVI ||
++	    dst_format >= (int)ARRAY_SIZE(amdv_target_max[0]))
++		return 0;
++
++	return amdv_target_max[src_format][dst_format];
++}
++
++static u32 amdv_out_target_min_lum(void)
++{
++	if (multi_dv_mode)
++		return m_dovi_setting.set_target_min_lum > 0 ?
++			(u32)m_dovi_setting.set_target_min_lum : 0;
++
++	return amdv_target_min_override ? amdv_target_min_override : amdv_target_min;
++}
++
+ static bool send_hdmi_pkt
+ 	(enum signal_format_enum src_format,
+ 	 enum signal_format_enum dst_format,
+@@ -7018,6 +7053,7 @@
+ 	struct vd_signal_info_s vd_signal;
+ 	bool dovi_ll_enable = false;
+ 	bool diagnostic_enable = false;
++	bool tgt_applied = false;
+ 
+ 	if (dst_format == FORMAT_DOVI &&
+ 	    !dolby_vision_on &&
+@@ -7046,55 +7082,19 @@
+ 			| (9 << 16)	/* bt2020 */
+ 			| (0x10 << 8)	/* bt2020-10 */
+ 			| (10 << 0);/* bt2020c */
+-		if (src_format != FORMAT_HDR10PLUS) {
+-			/* keep as r,g,b when src not HDR+ */
+-			if (hdr10_data.primaries[0][0] !=
+-				((p_hdr->primaries_x_0_msb << 8)
+-				| p_hdr->primaries_x_0_lsb))
+-				flag = true;
+-			hdr10_data.primaries[0][0] =
+-				(p_hdr->primaries_x_0_msb << 8)
+-				| p_hdr->primaries_x_0_lsb;
+-
+-			if (hdr10_data.primaries[0][1] !=
+-				((p_hdr->primaries_y_0_msb << 8)
+-				| p_hdr->primaries_y_0_lsb))
+-				flag = true;
+-			hdr10_data.primaries[0][1] =
+-				(p_hdr->primaries_y_0_msb << 8)
+-				| p_hdr->primaries_y_0_lsb;
+-
+-			if (hdr10_data.primaries[1][0] !=
+-				((p_hdr->primaries_x_1_msb << 8)
+-				| p_hdr->primaries_x_1_lsb))
+-				flag = true;
+-			hdr10_data.primaries[1][0] =
+-				(p_hdr->primaries_x_1_msb << 8)
+-				| p_hdr->primaries_x_1_lsb;
+-
+-			if (hdr10_data.primaries[1][1] !=
+-				((p_hdr->primaries_y_1_msb << 8)
+-				| p_hdr->primaries_y_1_lsb))
+-				flag = true;
+-			hdr10_data.primaries[1][1] =
+-				(p_hdr->primaries_y_1_msb << 8)
+-				| p_hdr->primaries_y_1_lsb;
+-			if (hdr10_data.primaries[2][0] !=
+-				((p_hdr->primaries_x_2_msb << 8)
+-				| p_hdr->primaries_x_2_lsb))
+-				flag = true;
+-			hdr10_data.primaries[2][0] =
+-				(p_hdr->primaries_x_2_msb << 8)
+-				| p_hdr->primaries_x_2_lsb;
+-
+-			if (hdr10_data.primaries[2][1] !=
+-				((p_hdr->primaries_y_2_msb << 8)
+-				| p_hdr->primaries_y_2_lsb))
+-				flag = true;
+-			hdr10_data.primaries[2][1] =
+-				(p_hdr->primaries_y_2_msb << 8)
+-				| p_hdr->primaries_y_2_lsb;
+-		} else {
++		/*
++		 * The DM returns the mastering-display primaries in r,g,b order
++		 * (prepare_hdr10_param normalises the source's g,b,r into named
++		 * r_x/g_x/b_x precisely because "DV will swap back to GBR in
++		 * send_hdmi_pkt"). The HDMI packet wants g,b,r - which is what
++		 * native HDR10 passthrough emits. The swap below used to be
++		 * applied only when the source was HDR10+; every other source
++		 * took a positional copy and went out rotated to r,g,b, telling
++		 * the sink the master's green primary was at red's coordinates.
++		 * Applies to all sources now, so VS10 HDR10 output matches
++		 * passthrough.
++		 */
++		{
+ 			/* need invert to g,b,r */
+ 			if (hdr10_data.primaries[0][0] !=
+ 				((p_hdr->primaries_x_1_msb << 8)
+@@ -7160,37 +7160,82 @@
+ 			(p_hdr->white_point_y_msb << 8)
+ 			| p_hdr->white_point_y_lsb;
+ 
+-		if (hdr10_data.luminance[0] !=
+-			((p_hdr->max_display_mastering_lum_msb << 8)
+-			| p_hdr->max_display_mastering_lum_lsb))
+-			flag = true;
+-		hdr10_data.luminance[0] =
+-			(p_hdr->max_display_mastering_lum_msb << 8)
+-			| p_hdr->max_display_mastering_lum_lsb;
+-
+-		if (hdr10_data.luminance[1] !=
+-			((p_hdr->min_display_mastering_lum_msb << 8)
+-			| p_hdr->min_display_mastering_lum_lsb))
+-			flag = true;
+-		hdr10_data.luminance[1] =
+-			(p_hdr->min_display_mastering_lum_msb << 8)
+-			| p_hdr->min_display_mastering_lum_lsb;
+-
+-		if (hdr10_data.max_content !=
+-			((p_hdr->max_content_light_level_msb << 8)
+-			| p_hdr->max_content_light_level_lsb))
+-			flag = true;
+-		hdr10_data.max_content =
+-			(p_hdr->max_content_light_level_msb << 8)
+-			| p_hdr->max_content_light_level_lsb;
+-
+-		if (hdr10_data.max_frame_average !=
+-			((p_hdr->max_frame_avg_light_level_msb << 8)
+-			| p_hdr->max_frame_avg_light_level_lsb))
+-			flag = true;
+-		hdr10_data.max_frame_average =
+-			(p_hdr->max_frame_avg_light_level_msb << 8)
+-			| p_hdr->max_frame_avg_light_level_lsb;
++		{
++			/*
++			 * Tell the sink what we ACTUALLY mapped to. hdr_info comes
++			 * back from the DM with the SOURCE's mastering luminance
++			 * echoed unchanged (measured: invariant across a 20x sweep
++			 * of the DM target), so a display fed VS10 HDR10 output
++			 * tone-maps a second time against the wrong reference peak
++			 * and nothing downstream compensates. Substitute the target
++			 * the DM was actually given; keep the source values when no
++			 * target is known.
++			 */
++			u32 tgt_max = amdv_out_target_max_nits(src_format,
++							       dst_format);
++			u32 tgt_min = amdv_out_target_min_lum();
++			u32 max_lum = (p_hdr->max_display_mastering_lum_msb << 8)
++				| p_hdr->max_display_mastering_lum_lsb;
++			u32 min_lum = (p_hdr->min_display_mastering_lum_msb << 8)
++				| p_hdr->min_display_mastering_lum_lsb;
++			bool mapped = multi_dv_mode ?
++				!m_dovi_setting.dovi2hdr10_nomapping :
++				!dovi_setting.dovi2hdr10_nomapping;
++
++			/* Nothing was remapped in no-mapping mode, so the
++			 * source's own values remain the truth there.
++			 */
++			if (mapped && tgt_max && tgt_max <= 0xffff) {
++				max_lum = tgt_max;
++				if (tgt_min && tgt_min <= 0xffff)
++					min_lum = tgt_min;
++				tgt_applied = true;
++			}
++
++			if (hdr10_data.luminance[0] != max_lum)
++				flag = true;
++			hdr10_data.luminance[0] = max_lum;
++
++			if (hdr10_data.luminance[1] != min_lum)
++				flag = true;
++			hdr10_data.luminance[1] = min_lum;
++		}
++
++		{
++			/*
++			 * MaxCLL/MaxFALL describe the CONTENT, and the DM does
++			 * not report what it produced - so once the picture has
++			 * been remapped to our own target the source's figures
++			 * are a known-false statement about the signal on the
++			 * wire, not merely an unknown one. Worse, they are the
++			 * binding term on the dominant sink rule (LG's HDR10
++			 * roll-off uses min(mastering, MaxCLL)), so leaving them
++			 * silently cancels the corrected mastering luminance
++			 * above.
++			 *
++			 * CTA-861-H 6.9.1: a group whose data bytes are all zero
++			 * "shall" be read as unknown, and footnote 19 names this
++			 * exact case - pre-processed content delivered without
++			 * content-light-level information. Zeroing is therefore
++			 * the standards-blessed way to say "remapped, no longer
++			 * known", and it lets the sink fall back to the mastering
++			 * luminance we do know.
++			 */
++			u32 mcll = tgt_applied ? 0u :
++				(((u32)p_hdr->max_content_light_level_msb << 8)
++				 | p_hdr->max_content_light_level_lsb);
++			u32 mfall = tgt_applied ? 0u :
++				(((u32)p_hdr->max_frame_avg_light_level_msb << 8)
++				 | p_hdr->max_frame_avg_light_level_lsb);
++
++			if (hdr10_data.max_content != mcll)
++				flag = true;
++			hdr10_data.max_content = mcll;
++
++			if (hdr10_data.max_frame_average != mfall)
++				flag = true;
++			hdr10_data.max_frame_average = mfall;
++		}
+ 
+ 		if (vinfo && vinfo->vout_device &&
+ 		    vinfo->vout_device->fresh_tx_hdr_pkt)
