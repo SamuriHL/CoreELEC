@@ -32,39 +32,46 @@ an untestable no-op, and lifting a non-zero sink black is a separate decision.
 Only v2 VSVDBs are handled (version field == 2), matching the only format our
 Kodi-side injector understands; v0/v1 blocks are left alone.
  
-The vsvdb_changed flag is decided from the FINAL table, after the cap. The
-caller rebuilds vsvdb_tbl from the pristine EDID every frame and sets
-vsvdb_changed by comparing that rebuild against the previous contents - which
-still hold last frame's CAPPED byte, so the comparison is unequal every single
-frame and the DM is told the sink's VSVDB changed once per frame for the entire
-title. Comparing the post-cap table against the last one actually handed over
-reports a change only when something really changed.
- 
-That comparison sits OUTSIDE the "do we have an RPU this frame" test on purpose.
-in_md is nulled at the top of amdv_control_path and only refilled for frames that
-actually arrived, so a run without a VD1 vframe - or with a short RPU - skips the
-cap and hands over the pristine table. If the change detection were inside that
-test, one such frame would pass the UNCAPPED table with changed = 1, and every
-frame after it would compare equal to the stale capped copy and report
-"unchanged": the DM would never hear about the correction again and the peak
-would revert to the sink's advertised value for the rest of the title. Keeping it
-outside means the revert is reported, and the next capped frame is reported too.
- 
-Two things this does NOT establish, stated rather than assumed:
- 
-- No GPL code anywhere clears vsvdb_changed - every assignment in the tree sets
-  it to 1 - so the clear has always been the blob's job. If the blob does clear
-  it after consuming the setting, the reasoning above is exactly right. If it
-  does not, then the flag was already stuck at 1 for the whole title before this
-  cap existed, and sending 0 is a behaviour change beyond the stated scope. That
-  cannot be distinguished without the blob or an on-box trace.
+vsvdb_changed IS DELIBERATELY NOT TOUCHED. An earlier revision of this patch
+also recomputed the flag from the post-cap table, on the reasoning that the
+caller rebuilds vsvdb_tbl from the pristine EDID every frame and compares it
+against contents still holding last frame's CAPPED byte - so it reports "changed"
+once per frame for the whole title. That reasoning is probably right, but the
+recomputation is not worth what it costs:
+
+- The BENEFIT is unprovable from GPL source. No GPL code anywhere clears
+  vsvdb_changed; every assignment sets it to 1, so clearing it has always been
+  the blob's job. Whether a per-frame flag actually harms the DM cannot be
+  distinguished without the blob or an on-box trace.
+- The COST is a demonstrable regression, and it is the very failure this patch
+  is supposed to prevent. Deciding the flag from a function-local static cache
+  means the cache is never invalidated when the DM's own VSVDB state is
+  destroyed underneath it. The provable instance needs no assumption about the
+  blob: on HDMI hotplug / AVR re-handshake / EDID re-read, amdv_control_path's
+  else-branch zeroes vsvdb_tbl, sets vsvdb_len = 0 and vsvdb_changed = 1, and
+  the DM is told "no VSVDB" - our block is skipped entirely because the length
+  is now below 8, so the cache never sees the excursion. When the display comes
+  back, the caller correctly sets vsvdb_changed = 1 again on the 0 -> 27 length
+  change, and the cache then OVERWRITES it back to 0 because the returning table
+  still equals the pre-unplug copy. The DM never re-learns the VSVDB and the peak
+  reverts to the sink's advertised value for the rest of the title. The same hole
+  exists at every site that resets the control path with invalid_m_dovi_setting
+  (use_ll_flag / ll_rgb_desired toggle, src/dst format or resolution change,
+  set_priority, pri_input, and the three "vd1/vd2 off, reset cp" paths).
+
+A correct version would hoist the cache to file scope and invalidate it at each
+of those resets. That is a larger change than the cap needs, for a benefit that
+is still unmeasured, so the flag is left exactly as the caller set it.
+
+One thing this does NOT establish, stated rather than assumed:
+
 - The cap itself still keys on input[0]. With enable_multi_core1 and pri_input
   == 1 the DV stream is on input[1] and neither the cap nor the correction
   applies. Pre-existing narrowness, carried forward deliberately, not fixed here.
  
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -11157,6 +11157,92 @@
+@@ -11157,6 +11157,65 @@
  	}
  	new_m_dovi_setting.input[IPCORE2_ID].valid = 1;
  
@@ -75,8 +82,6 @@ Two things this does NOT establish, stated rather than assumed:
 +	 */
 +	if (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
 +	    new_m_dovi_setting.vsvdb_len >= 8) {
-+		static u8 last_vsvdb_tbl[sizeof(new_m_dovi_setting.vsvdb_tbl)];
-+		static u32 last_vsvdb_len;
 +		static u16 last_logged_idx = 0xffff;
 +		unsigned char *x = &new_m_dovi_setting.vsvdb_tbl[5];
 +
@@ -85,14 +90,9 @@ Two things this does NOT establish, stated rather than assumed:
 +		 * VD1 vframe, or with a short/absent RPU, legitimately has none
 +		 * (in_md is nulled at the top of this function and only refilled
 +		 * for frames that arrived), so the cap is skipped for that frame
-+		 * and the pristine table goes to the DM. The change detection
-+		 * below deliberately sits OUTSIDE this inner test: if it were
-+		 * inside, one such frame would hand over the uncapped table with
-+		 * vsvdb_changed = 1, and every later frame would then compare
-+		 * equal to the stale capped copy and report "unchanged" - so the
-+		 * DM would never be told about the correction again and the peak
-+		 * would silently revert to the sink's advertised value for the
-+		 * rest of the title.
++		 * and the pristine table goes to the DM.
++		 *
++		 * vsvdb_changed is deliberately LEFT ALONE - see the patch header.
 +		 */
 +		if (new_m_dovi_setting.input[0].src_format == FORMAT_DOVI &&
 +		    new_m_dovi_setting.input[0].in_md &&
@@ -131,26 +131,6 @@ Two things this does NOT establish, stated rather than assumed:
 +					}
 +				}
 +			}
-+		}
-+
-+		/*
-+		 * Decide vsvdb_changed from the FINAL table. The caller rebuilds
-+		 * vsvdb_tbl from the pristine EDID every frame and sets the flag
-+		 * by comparing that rebuild against the previous contents, which
-+		 * still hold last frame's CAPPED byte - so it is unequal every
-+		 * single frame and the DM is told the sink's VSVDB changed once
-+		 * per frame for the whole title. Comparing against the last table
-+		 * actually handed over reports a change only when one happened.
-+		 */
-+		if (new_m_dovi_setting.vsvdb_len == last_vsvdb_len &&
-+		    !memcmp(new_m_dovi_setting.vsvdb_tbl, last_vsvdb_tbl,
-+			    last_vsvdb_len)) {
-+			new_m_dovi_setting.vsvdb_changed = 0;
-+		} else {
-+			new_m_dovi_setting.vsvdb_changed = 1;
-+			memcpy(last_vsvdb_tbl, new_m_dovi_setting.vsvdb_tbl,
-+			       sizeof(last_vsvdb_tbl));
-+			last_vsvdb_len = new_m_dovi_setting.vsvdb_len;
 +		}
 +	}
 +
