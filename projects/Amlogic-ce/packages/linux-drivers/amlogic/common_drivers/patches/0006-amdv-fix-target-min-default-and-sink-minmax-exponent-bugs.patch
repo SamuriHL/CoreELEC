@@ -30,7 +30,7 @@ second competing knob would just be confusing.
 @@ -389,7 +389,15 @@
  static u32 probe_mode;
  static u32 probe_en;
-
+ 
 -static unsigned int amdv_target_min = 50; /* 0.0001 */
 +/* Default DM target display min luminance, in 0.0001-nit units. 50
 + * (0.005 nit) floors PQ output black at 10-bit code ~77 - visible black
