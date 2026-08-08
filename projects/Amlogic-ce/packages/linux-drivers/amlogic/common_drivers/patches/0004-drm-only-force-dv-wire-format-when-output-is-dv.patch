@@ -29,7 +29,7 @@ carries the forced-HDR10 signal exactly like native HDR10 playback.
 @@ -286,6 +286,23 @@
  		return true;
  }
-
+ 
 +/* The Dolby Vision tunnelling wire-format constraints (RGB/444 8-bit for
 + * STD, YUV422 12-bit for LL) only apply when the signal on the wire is
 + * actually Dolby Vision. VS10 can run the DV core while outputting
@@ -60,7 +60,7 @@ carries the forced-HDR10 signal exactly like native HDR10 playback.
  		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
  			attr->colorformat = HDMI_COLORSPACE_YUV444;
 @@ -362,7 +379,7 @@
-
+ 
  	// check for bit colourdepth limit
  	// force bit colourdepth when DV mode
 -	if (is_amdv_enable()) {
