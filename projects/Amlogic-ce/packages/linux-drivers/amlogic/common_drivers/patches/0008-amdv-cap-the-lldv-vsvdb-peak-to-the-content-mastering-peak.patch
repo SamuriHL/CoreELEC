@@ -32,9 +32,40 @@ an untestable no-op, and lifting a non-zero sink black is a separate decision.
 Only v2 VSVDBs are handled (version field == 2), matching the only format our
 Kodi-side injector understands; v0/v1 blocks are left alone.
  
+The vsvdb_changed flag is decided from the FINAL table, after the cap. The
+caller rebuilds vsvdb_tbl from the pristine EDID every frame and sets
+vsvdb_changed by comparing that rebuild against the previous contents - which
+still hold last frame's CAPPED byte, so the comparison is unequal every single
+frame and the DM is told the sink's VSVDB changed once per frame for the entire
+title. Comparing the post-cap table against the last one actually handed over
+reports a change only when something really changed.
+ 
+That comparison sits OUTSIDE the "do we have an RPU this frame" test on purpose.
+in_md is nulled at the top of amdv_control_path and only refilled for frames that
+actually arrived, so a run without a VD1 vframe - or with a short RPU - skips the
+cap and hands over the pristine table. If the change detection were inside that
+test, one such frame would pass the UNCAPPED table with changed = 1, and every
+frame after it would compare equal to the stale capped copy and report
+"unchanged": the DM would never hear about the correction again and the peak
+would revert to the sink's advertised value for the rest of the title. Keeping it
+outside means the revert is reported, and the next capped frame is reported too.
+ 
+Two things this does NOT establish, stated rather than assumed:
+ 
+- No GPL code anywhere clears vsvdb_changed - every assignment in the tree sets
+  it to 1 - so the clear has always been the blob's job. If the blob does clear
+  it after consuming the setting, the reasoning above is exactly right. If it
+  does not, then the flag was already stuck at 1 for the whole title before this
+  cap existed, and sending 0 is a behaviour change beyond the stated scope. That
+  cannot be distinguished without the blob or an on-box trace.
+- The cap itself still keys on input[0]. With enable_multi_core1 and pri_input
+  == 1 the DV stream is on input[1] and neither the cap nor the correction
+  applies. Pre-existing narrowness, carried forward deliberately, not fixed here.
+ 
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -11158,4 +11158,44 @@
+@@ -11157,6 +11157,92 @@
+ 	}
  	new_m_dovi_setting.input[IPCORE2_ID].valid = 1;
  
 +	/* LLDV: the DM takes its target peak from the sink's VSVDB, so cap it to
@@ -43,39 +74,86 @@ Kodi-side injector understands; v0/v1 blocks are left alone.
 +	 * In-memory table only; never the EDID (that re-latch blanks the sink).
 +	 */
 +	if (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
-+	    new_m_dovi_setting.input[0].src_format == FORMAT_DOVI &&
-+	    new_m_dovi_setting.input[0].in_md &&
-+	    new_m_dovi_setting.input[0].in_md_size > 67 &&
 +	    new_m_dovi_setting.vsvdb_len >= 8) {
++		static u8 last_vsvdb_tbl[sizeof(new_m_dovi_setting.vsvdb_tbl)];
++		static u32 last_vsvdb_len;
++		static u16 last_logged_idx = 0xffff;
 +		unsigned char *x = &new_m_dovi_setting.vsvdb_tbl[5];
-+		const unsigned char *md =
-+			(const unsigned char *)new_m_dovi_setting.input[0].in_md;
 +
-+		/* v2 only: max_pq = 2055 + 65 * field (bits 7:3) */
-+		if (((x[0] >> 5) & 0x07) == 2) {
-+			u16 vsvdb_max = 2055 + 65 * (x[2] >> 3);
-+			u16 src_max_pq = ((u16)md[66] << 8) | md[67];
++		/*
++		 * The cap needs this frame's RPU. A control-path run without a
++		 * VD1 vframe, or with a short/absent RPU, legitimately has none
++		 * (in_md is nulled at the top of this function and only refilled
++		 * for frames that arrived), so the cap is skipped for that frame
++		 * and the pristine table goes to the DM. The change detection
++		 * below deliberately sits OUTSIDE this inner test: if it were
++		 * inside, one such frame would hand over the uncapped table with
++		 * vsvdb_changed = 1, and every later frame would then compare
++		 * equal to the stale capped copy and report "unchanged" - so the
++		 * DM would never be told about the correction again and the peak
++		 * would silently revert to the sink's advertised value for the
++		 * rest of the title.
++		 */
++		if (new_m_dovi_setting.input[0].src_format == FORMAT_DOVI &&
++		    new_m_dovi_setting.input[0].in_md &&
++		    new_m_dovi_setting.input[0].in_md_size > 67) {
++			const unsigned char *md = (const unsigned char *)
++				new_m_dovi_setting.input[0].in_md;
 +
-+			if (src_max_pq && src_max_pq < vsvdb_max) {
-+				u16 idx = 0;
++			/* v2 only: max_pq = 2055 + 65 * field (bits 7:3) */
++			if (((x[0] >> 5) & 0x07) == 2) {
++				u16 vsvdb_max = 2055 + 65 * (x[2] >> 3);
++				u16 src_max_pq = ((u16)md[66] << 8) | md[67];
 +
-+				/* round up so the cap never lands below the
-+				 * content's own peak
-+				 */
-+				if (src_max_pq > 2055)
-+					idx = (src_max_pq - 2055 + 64) / 65;
-+				if (idx > 31)
-+					idx = 31;
-+				if ((x[2] >> 3) != idx) {
-+					x[2] = (x[2] & 0x07) |
-+					       ((idx & 0x1F) << 3);
-+					if (debug_dolby & 1)
-+						pr_dv_dbg("LLDV: vsvdb peak capped to source %u pq (idx %u, was %u pq)\n",
-+							  src_max_pq, idx, vsvdb_max);
++				if (src_max_pq && src_max_pq < vsvdb_max) {
++					u16 idx = 0;
++
++					/* round up so the cap never lands below
++					 * the content's own peak
++					 */
++					if (src_max_pq > 2055)
++						idx = (src_max_pq - 2055 + 64) / 65;
++					if (idx > 31)
++						idx = 31;
++					if ((x[2] >> 3) != idx) {
++						x[2] = (x[2] & 0x07) |
++						       ((idx & 0x1F) << 3);
++						/* the table is rebuilt from the
++						 * pristine EDID every frame, so
++						 * this fires every frame - log
++						 * only when the cap itself moves
++						 */
++						if ((debug_dolby & 1) &&
++						    idx != last_logged_idx)
++							pr_dv_dbg("LLDV: vsvdb peak capped to source %u pq (idx %u, was %u pq)\n",
++								  src_max_pq, idx, vsvdb_max);
++						last_logged_idx = idx;
++					}
 +				}
 +			}
++		}
++
++		/*
++		 * Decide vsvdb_changed from the FINAL table. The caller rebuilds
++		 * vsvdb_tbl from the pristine EDID every frame and sets the flag
++		 * by comparing that rebuild against the previous contents, which
++		 * still hold last frame's CAPPED byte - so it is unequal every
++		 * single frame and the DM is told the sink's VSVDB changed once
++		 * per frame for the whole title. Comparing against the last table
++		 * actually handed over reports a change only when one happened.
++		 */
++		if (new_m_dovi_setting.vsvdb_len == last_vsvdb_len &&
++		    !memcmp(new_m_dovi_setting.vsvdb_tbl, last_vsvdb_tbl,
++			    last_vsvdb_len)) {
++			new_m_dovi_setting.vsvdb_changed = 0;
++		} else {
++			new_m_dovi_setting.vsvdb_changed = 1;
++			memcpy(last_vsvdb_tbl, new_m_dovi_setting.vsvdb_tbl,
++			       sizeof(last_vsvdb_tbl));
++			last_vsvdb_len = new_m_dovi_setting.vsvdb_len;
 +		}
 +	}
 +
  	if (debug_dolby & 0x400)
  		do_gettimeofday(&start);
+ 
