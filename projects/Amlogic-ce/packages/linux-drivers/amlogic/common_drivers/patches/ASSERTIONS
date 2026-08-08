@@ -1,0 +1,63 @@
+# Content assertions for this patch stack, checked by
+#   projects/Amlogic-ce/tools/check-patches.py apply --assertions <this file>
+#
+# WHY THIS FILE EXISTS. `patch` exiting 0 does not mean the change arrived. A
+# hunk header whose declared line counts disagree with its body makes GNU patch
+# read only the declared number of lines, silently discard the rest of that
+# hunk, lose sync for every later hunk in the same file - and still exit 0. The
+# build then succeeds with the change missing from the binary. That happened
+# here on 2026-08-08 and cost two builds before it was understood.
+#
+# So after applying the stack to pristine source we read the RESULT and assert
+# that the load-bearing lines are actually present. One or two per patch is
+# enough - pick something distinctive that would not survive a truncation.
+#
+# Format:  <path relative to the source root>:<literal string>:<exact count>
+# The string may contain colons; the count is taken from the last colon.
+# Blank lines and lines starting with # are ignored.
+
+# Prefer DISTINCTIVE DECLARATIONS over bare identifier counts. A raw name count
+# shifts whenever a comment or forward declaration is edited, which produces
+# false failures and trains you to "fix" the number instead of reading it.
+# Assert on a line the patch actually introduces.
+
+# --- 0001 / 0006 / 0007: DM target luminance overrides -----------------------
+drivers/media/enhancement/amdolby_vision/amdv.c:static unsigned int amdv_target_max_override;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_target_min_override, uint, 0664);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:static unsigned int amdv_target_min = 1;:1
+
+# --- 0002 / 0005: DV VSIF hold across a disc session -------------------------
+drivers/media/enhancement/amdolby_vision/amdv.c:static bool dolby_vision_vsif_hold;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:void amdv_clear_vsif_hold(void):1
+
+# --- 0003: hold VS10 forced HDR10 across a switch ----------------------------
+drivers/media/enhancement/amdolby_vision/amdv.c:sink_hdr_support_ori_cap:2
+
+# --- 0008: cap the LLDV VSVDB peak to the content mastering peak -------------
+# The cap must be present...
+drivers/media/enhancement/amdolby_vision/amdv.c:LLDV: vsvdb peak capped:1
+# ...and the withdrawn vsvdb_changed recompute must NOT come back (see the
+# patch header: its static cache could suppress a needed re-latch after an
+# EDID re-read, which is the exact failure the patch exists to prevent).
+drivers/media/enhancement/amdolby_vision/amdv.c:last_vsvdb_tbl:0
+
+# --- 0009: consumer IEC60958 channel status for multi-channel LPCM -----------
+sound/soc/amlogic/auge/tdm.c:MULTI_LPCM:2
+
+# --- 0010: establish the ALSA channel map before the first prepare -----------
+# Created at .open, removed at .close - the control's lifetime must bracket the
+# PCM's exactly. Both halves are asserted because losing either reopens a real
+# defect (a control outliving its PCM, or a pause that never restores it).
+sound/soc/amlogic/auge/tdm.c:aml_dai_tdm_chmap_ctl_create(substream, p_tdm):2
+sound/soc/amlogic/auge/tdm.c:aml_dai_tdm_chmap_ctl_remove(substream);:1
+sound/soc/amlogic/auge/tdm.c:snd_ctl_remove(card,:1
+
+# --- 0011: honest HDR10 output mastering metadata + primary order ------------
+drivers/media/enhancement/amdolby_vision/amdv.c:amdv_out_target_max_nits:2
+# The substitution must stay guarded on actually changing something, or the
+# MaxCLL/MaxFALL zeroing moves a sink's roll-off knee for no benefit.
+drivers/media/enhancement/amdolby_vision/amdv.c:tgt_max != max_lum:2
+drivers/media/enhancement/amdolby_vision/amdv.c:min_lum = (tgt_min && tgt_min <= 0xffff) ? tgt_min : 0;:1
+
+# --- negative control: proves the assertion mechanism can actually fail ------
+drivers/media/enhancement/amdolby_vision/amdv.c:zzz_this_string_must_never_exist:0
