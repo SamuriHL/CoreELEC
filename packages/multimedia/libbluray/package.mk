@@ -7,9 +7,17 @@ PKG_VERSION="1.5.0"
 PKG_SHA256="7a5d945a9c2b0064a748b77a4c5ab563175bb7219e9d562b2b2399790726a388"
 PKG_LICENSE="LGPL-2.1-or-later"
 PKG_SITE="https://www.videolan.org/developers/libbluray.html"
-# 1.5.0 release tarball not yet published on download.videolan.org (last/ = 1.4.1);
-# use the tag archive like the libudfread package does. meson resolves libudfread
-# from the sysroot (>= 1.2.0), so the empty contrib/ submodule in the archive is fine.
+# Deliberately the TAG ARCHIVE, not the release tarball on download.videolan.org
+# (which does now exist - an older comment here claimed otherwise). Two reasons:
+#  - our all-001/all-002 patch pair is regenerated against this archive; upstream's
+#    pair is regenerated against theirs, and mixing them rejects hunks in bluray.h.
+#  - the tag export leaves contrib/libudfread EMPTY, so -Dembed_udfread=true
+#    resolves libudfread from the sysroot (the version in PKG_DEPENDS_TARGET).
+#    The release tarball ships contrib/libudfread populated and would embed the
+#    bundled copy instead, silently swapping the UDF implementation under the
+#    whole Blu-ray disc path. Every file the two share is byte-identical.
+# Switching to the release tarball means taking upstream's patch pair with it,
+# and testing the resulting disc path - a change of its own, not a drive-by.
 PKG_URL="https://code.videolan.org/videolan/${PKG_NAME}/-/archive/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread"
 PKG_LONGDESC="libbluray is an open-source library designed for Blu-Ray Discs playback for media players."
