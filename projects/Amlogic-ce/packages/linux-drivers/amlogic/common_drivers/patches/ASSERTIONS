@@ -59,5 +59,12 @@ drivers/media/enhancement/amdolby_vision/amdv.c:amdv_out_target_max_nits:2
 drivers/media/enhancement/amdolby_vision/amdv.c:tgt_max != max_lum:2
 drivers/media/enhancement/amdolby_vision/amdv.c:min_lum = (tgt_min && tgt_min <= 0xffff) ? tgt_min : 0;:1
 
+# --- 0008: the LLDV cap must stay gated on DV OUTPUT, not the LL policy alone --
+# CoreELEC 5591768488 sets ll_policy = LL_YUV422 whenever the SINK cannot do DV,
+# so the policy no longer implies DV on the wire. A bare 'dst_format ==
+# FORMAT_DOVI' count is useless here (upstream has 5 of its own), so assert the
+# comment sentence that is unique to this guard and sits inside its hunk.
+drivers/media/enhancement/amdolby_vision/amdv.c:sets ll_policy = LL_YUV422 whenever the SINK cannot do DV:1
+
 # --- negative control: proves the assertion mechanism can actually fail ------
 drivers/media/enhancement/amdolby_vision/amdv.c:zzz_this_string_must_never_exist:0
