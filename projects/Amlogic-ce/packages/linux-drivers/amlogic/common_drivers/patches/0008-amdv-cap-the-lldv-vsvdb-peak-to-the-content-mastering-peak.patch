@@ -71,7 +71,7 @@ One thing this does NOT establish, stated rather than assumed:
  
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -11157,6 +11157,65 @@
+@@ -11157,6 +11157,74 @@
  	}
  	new_m_dovi_setting.input[IPCORE2_ID].valid = 1;
  
@@ -79,8 +79,17 @@ One thing this does NOT establish, stated rather than assumed:
 +	 * the content's own mastering peak - otherwise low-peak titles get so
 +	 * much headroom that the trims map to nothing. Ported from avdvplus R9.
 +	 * In-memory table only; never the EDID (that re-latch blanks the sink).
++	 *
++	 * dst_format is checked as well as the LL policy: CoreELEC 5591768488 now
++	 * sets ll_policy = LL_YUV422 whenever the SINK cannot do DV, not only for
++	 * player-led, so the policy alone no longer implies DV on the wire. Without
++	 * this the cap would fire on a VS10 HDR10/SDR conversion to a non-DV panel
++	 * (reachable there only via our own vsvdb override, which writes vsvdb_len
++	 * directly through amdv_update_vsvdb_config and bypasses the EDID check),
++	 * where there is no LLDV output and the sink VSVDB is not the DM's target.
 +	 */
 +	if (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
++	    dst_format == FORMAT_DOVI &&
 +	    new_m_dovi_setting.vsvdb_len >= 8) {
 +		static u16 last_logged_idx = 0xffff;
 +		unsigned char *x = &new_m_dovi_setting.vsvdb_tbl[5];
@@ -137,3 +146,4 @@ One thing this does NOT establish, stated rather than assumed:
  	if (debug_dolby & 0x400)
  		do_gettimeofday(&start);
  
+
