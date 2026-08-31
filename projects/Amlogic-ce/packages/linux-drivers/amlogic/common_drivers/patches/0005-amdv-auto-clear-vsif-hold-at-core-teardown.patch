@@ -15,31 +15,73 @@ drops both the hold request and the active latch. A disc-session segment swap
 keeps the core enabled and never calls enable_amdv(0), so the hold still
 survives the gaps it was written for; only a genuine full teardown clears it.
 
+Clearing the flags is not on its own enough, which is why this lives next to
+last_dst_format rather than beside the module_param. While the hold is set the
+DOVI branch of send_hdmi_pkt() returns early and deliberately leaves
+last_dst_format at FORMAT_DOVI, so the next segment resumes packet-identical.
+At a real teardown the core stops presenting, send_hdmi_pkt() is never called
+again, and that pending DOVI->SDR transition is therefore never emitted: the
+sink keeps the Dolby VSIF latched over SDR/GUI pixels indefinitely.
+
+Measured on an AM9 Pro 2026-08-30 after a Fallout S1D1 disc session: EOTF
+stays DV-Std with dolby_vision_enable=N, dolby_vision_mode=5 and the core off,
+hdmi_hdr_status reads DolbyVision-Std, and it survives stopping playback, a
+Kodi restart and an HDMI PHY power cycle. Only a reboot clears it. The panel
+is black on everything, GUI included, for as long as it lasts.
+
+So emit the teardown here whenever the core goes down with DOVI still the last
+signalled format, and put last_dst_format back to SDR to match.
+
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -186,8 +186,22 @@
- static bool dolby_vision_vsif_hold;
- static bool vsif_hold_active;
- module_param(dolby_vision_vsif_hold, bool, 0664);
- MODULE_PARM_DESC(dolby_vision_vsif_hold, "\n dolby_vision_vsif_hold\n");
-+
+@@ -6984,6 +6984,47 @@
+ /* #define HDMI_SEND_ALL_PKT */
+ static u32 last_dst_format = FORMAT_SDR;
+ 
 +/* Self-healing release for the disc-session VSIF hold: called from
 + * enable_amdv(0) so a full DV-core teardown (return-to-GUI / stop) is never
-+ * left with the hold latched when userspace failed to clear it (player crash or
-+ * abnormal exit). A stuck hold otherwise swallows the DOVI->SDR teardown and
-+ * leaves BT.2020 + the Dolby VSIF signalled over SDR/GUI pixels.
++ * left with the hold latched when userspace failed to clear it (player crash
++ * or abnormal exit). A stuck hold otherwise swallows the DOVI->SDR teardown
++ * and leaves BT.2020 + the Dolby VSIF signalled over SDR/GUI pixels.
++ *
++ * Dropping the two flags is not sufficient. While held, the DOVI branch of
++ * send_hdmi_pkt() returns early and deliberately leaves last_dst_format at
++ * FORMAT_DOVI so the next segment resumes packet-identical. At a genuine
++ * teardown the core stops presenting, so send_hdmi_pkt() never runs again and
++ * the pending DOVI->SDR transition is never emitted - the sink keeps the
++ * Dolby VSIF latched for good (survives stop, a Kodi restart and an HDMI PHY
++ * power cycle; only a reboot clears it).
++ *
++ * Emit that teardown here instead, whenever we are going down with DOVI still
++ * the last signalled format. Guarded on last_dst_format rather than on
++ * vsif_hold_active because a DV segment that presented after the swallowed
++ * transition clears the active latch while leaving the sink signalled DOVI
++ * just the same.
 + */
 +void amdv_clear_vsif_hold(void)
 +{
++	const struct vinfo_s *vinfo;
++
 +	if (dolby_vision_vsif_hold)
 +		pr_dv_dbg("clear stale VSIF hold at DV teardown (holder missed release)\n");
 +	dolby_vision_vsif_hold = false;
 +	vsif_hold_active = false;
++
++	if (last_dst_format != FORMAT_DOVI)
++		return;
++
++	vinfo = get_current_vinfo();
++	if (vinfo && vinfo->vout_device &&
++	    vinfo->vout_device->fresh_tx_vsif_pkt) {
++		pr_dv_dbg("send pkt: DV teardown with VSIF latched, signal SDR\n");
++		vinfo->vout_device->fresh_tx_vsif_pkt(0, 0, NULL, true);
++	}
++	last_dst_format = FORMAT_SDR;
 +}
- 
- static bool amdv_efuse_bypass;
- module_param(amdv_efuse_bypass, bool, 0664);
- MODULE_PARM_DESC(amdv_efuse_bypass, "\n amdv_efuse_bypass\n");
++
+ static bool send_hdmi_pkt
+ 	(enum signal_format_enum src_format,
+ 	 enum signal_format_enum dst_format,
 --- a/drivers/media/enhancement/amdolby_vision/amdv.h
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.h
 @@ -799,6 +799,7 @@
