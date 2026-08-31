@@ -29,6 +29,14 @@ drivers/media/enhancement/amdolby_vision/amdv.c:static unsigned int amdv_target_
 # --- 0002 / 0005: DV VSIF hold across a disc session -------------------------
 drivers/media/enhancement/amdolby_vision/amdv.c:static bool dolby_vision_vsif_hold;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:void amdv_clear_vsif_hold(void):1
+# The self-heal must EMIT the swallowed DOVI->SDR transition, not just drop the
+# flags: with the core down send_hdmi_pkt() never runs again, so a truncated
+# hunk here leaves the sink latched in DV-Std until a reboot (seen 2026-08-30).
+drivers/media/enhancement/amdolby_vision/amdv.c:send pkt: DV teardown with VSIF latched, signal SDR:1
+# ...and the tail of that hunk, so truncation after the log line is caught too.
+# Count is 3: the file-static initialiser, the reset added by the self-heal,
+# and one pre-existing upstream assignment further down the file.
+drivers/media/enhancement/amdolby_vision/amdv.c:last_dst_format = FORMAT_SDR;:3
 
 # --- 0003: hold VS10 forced HDR10 across a switch ----------------------------
 drivers/media/enhancement/amdolby_vision/amdv.c:sink_hdr_support_ori_cap:2
