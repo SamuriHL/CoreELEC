@@ -10,8 +10,15 @@ PKG_SITE="http://www.videolan.org/developers/libaacs.html"
 PKG_URL="https://download.videolan.org/pub/videolan/libaacs/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.bz2"
 PKG_DEPENDS_TARGET="toolchain libgcrypt"
 PKG_LONGDESC="Open implementation of the AACS (Advanced Access Content System) specification."
+# Required, not cosmetic: the upstream backport patch adds src/libaacs/mk.c to
+# Makefile.am, and scripts/build only runs autoreconf when this is set. Without
+# it the release tarball's pre-generated Makefile.in is used unchanged, mk.c is
+# never compiled, and the link fails on its symbols.
+PKG_TOOLCHAIN="autotools"
 
-PKG_CONFIGURE_OPTS_TARGET="--disable-optimizations \
+PKG_CONFIGURE_OPTS_TARGET="--disable-werror \
+                           --disable-extra-warnings \
+                           --disable-optimizations \
                            --with-libgcrypt-prefix=${SYSROOT_PREFIX}/usr \
                            --with-libgpg-error-prefix=${SYSROOT_PREFIX}/usr \
                            --with-gnu-ld"
