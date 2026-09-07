@@ -81,12 +81,9 @@ drivers/media/enhancement/amdolby_vision/amdv.c:zzz_this_string_must_never_exist
 drivers/media/enhancement/amdolby_vision/amdv.c:bool el_missing = false;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = true;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
+# Aggregate count, kept deliberately: 4 of these are pre-existing upstream
+# sites (amdv.c ~8452, ~8748, ~10078, ~11089) and only one is ours. It earns its
+# place as the hunk TAIL guard - a truncation after `el_flag = 0;` drops it to 4
+# - but upstream churn will move it, so read the sites before editing the number.
 drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
 
-# 0013: hold a dual-layer BL frame until its EL is queued (v2 path had no wait)
-drivers/media/enhancement/amdolby_vision/amdv.h:unsigned int el_wait_count;:1
-drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_el_wait_max, uint, 0664);:1
-drivers/media/enhancement/amdolby_vision/amdv.c:} else if (!dv_inst[dv_id].el_wait_giveup) {:1
-drivers/media/enhancement/amdolby_vision/amdv.c:dv_inst[i].el_wait_giveup = false;:2
-drivers/media/enhancement/amdolby_vision/amdv.c:el queue still empty after %u vsyncs:1
-drivers/media/enhancement/amdolby_vision/amdv.c:static uint amdv_el_wait_max = 2;:1
