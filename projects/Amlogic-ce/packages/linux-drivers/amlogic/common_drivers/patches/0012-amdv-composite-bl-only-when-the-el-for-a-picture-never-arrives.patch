@@ -15,8 +15,10 @@ through to the "not found el" arm. Two things then disagree:
     after the error as "VID: VD1 off with async true".
 
   - el_flag is set unconditionally a few lines later from req.dv_enhance_exist,
-    which vh265 forces to 1 for every frame of a frame-based dual-layer stream
-    (vh265.c:9833). It is latched into dv_inst[].el_flag and pushed to the blob
+    which the decoder reports per picture from m_PIC[index]->dv_enhance_exist
+    (vh265.c:9831). Not the frame-based shortcut at vh265.c:9833 - that needs
+    vdec_frame_based(), and a FEL Blu-ray is opened in STREAM dec_mode.
+    It is latched into dv_inst[].el_flag and pushed to the blob
     on every update, so core1a is left configured to composite an enhancement
     layer whose source layer is off. That composite is black.
 
