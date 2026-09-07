@@ -22,6 +22,22 @@ through to the "not found el" arm. Two things then disagree:
     on every update, so core1a is left configured to composite an enhancement
     layer whose source layer is off. That composite is black.
 
+There is a second way in, found by review after the first version shipped: when
+dv_enhance_exist is set but the dvel arm is never entered at all - the provider
+is not registered yet at segment start, or it is named "dveldec2" while the
+strcmp only accepts "dveldec". Control falls to the sibling `else if
+(toggle_mode == 1)` and the result is the same black composite. So the condition
+is now a POST-condition on el_flag rather than a flag set inside one arm: "we
+were told there is an EL, we were toggling, and we did not pair" covers every
+route in. The toggle_mode term keeps a non-toggling still on its latched state
+instead of re-deciding from a stale req.
+
+The toggle_mode == 2 path restored el_flag from dv_inst[] without its companion
+el_halfsize_flag, which rebuilds the exact "no EL, but the EL is half size" pair
+that renders green. That arm is dead today - every dv_toggle_frame() call site
+passes new_frame = true - but this patch is what would turn it from harmless
+into a green screen, so it is closed here too.
+
 Nothing recovers it because a still leaves toggle_mode at 0 (video_func.c:648),
 so the frame is never re-toggled and the latched setting stands until new
 content arrives - which is exactly what a keypress produces.
@@ -83,15 +99,22 @@ non-NULL el_vf always takes the paired branch and that arm is dead code.
  	u32 w = 0xffff;
  	u32 h = 0xffff;
  	int meta_flag_bl = 1;
-@@ -10052,6 +10053,7 @@
- 					("bl(%p-%lld) not found el(%p-%lld)\n",
- 					 vf, vf->pts_us64,
- 					 el_vf, el_vf->pts_us64);
-+				el_missing = true;
- 			}
- 		} else if (toggle_mode == 1) {
- 			if (debug_dolby & 2)
-@@ -10063,6 +10065,20 @@
+@@ -10060,9 +10061,35 @@
+ 			amdvdolby_vision_vf_add(vf, NULL);
+ 		}
+ 
++		/* This picture was supposed to have an enhancement layer and did
++		 * not get one. Two ways in, and the fix has to cover both:
++		 * dvel_vf_get() returned nothing (the EL decoder is idle - a BD-J
++		 * still), or the dvel arm was never entered at all, because the
++		 * provider is not registered yet at segment start or is named
++		 * "dveldec2" while the strcmp above only accepts "dveldec".
++		 * Testing el_flag after the fact catches every route in; testing
++		 * toggle_mode keeps a non-toggling still on its latched state
++		 * rather than re-deciding from a stale req.
++		 */
++		el_missing = req.dv_enhance_exist && toggle_mode == 1 && !el_flag;
++
  		if (req.dv_enhance_exist)
  			el_flag = 1;
  
@@ -99,10 +122,10 @@ non-NULL el_vf always takes the paired branch and that arm is dead code.
 +		 * off, so leaving el_flag set asks core1a to composite an
 +		 * enhancement layer that has no source, and that composite is
 +		 * black. el_halfsize_flag has to go with it - it is cleared only
-+		 * on the paired path, so a BL-only composite would otherwise
-+		 * still be told the absent EL is half size, which renders green.
-+		 * A still never re-toggles the frame, so either state would hold
-+		 * until new content arrives.
++		 * on the paired path, so a BL-only composite would otherwise still
++		 * be told the absent EL is half size, which renders green. A still
++		 * never re-toggles the frame, so either state would hold until new
++		 * content arrives.
 +		 */
 +		if (el_missing) {
 +			el_flag = 0;
@@ -112,3 +135,15 @@ non-NULL el_vf always takes the paired branch and that arm is dead code.
  		if (toggle_mode != 2) {
  			if (!drop_flag) {
  				dv_inst[dv_id].last_total_md_size = total_md_size;
+@@ -10081,6 +10108,11 @@
+ 				mel_flag = dv_inst[dv_id].last_mel_mode;
+ 			} while (read_seqcount_retry(&dv_inst[dv_id].seq, __pseq));
+ 			el_flag = dv_inst[dv_id].el_flag;
++			/* must travel with el_flag: restoring one without the
++			 * other is the "no EL, but the EL is half size" pair
++			 * that renders green
++			 */
++			el_halfsize_flag = dv_inst[dv_id].el_halfsize_flag;
+ 			if (debug_dolby & 2)
+ 				pr_dv_dbg("update el_flag %d, melFlag %d\n",
+ 					     el_flag, mel_flag);

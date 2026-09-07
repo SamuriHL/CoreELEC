@@ -79,7 +79,8 @@ drivers/media/enhancement/amdolby_vision/amdv.c:zzz_this_string_must_never_exist
 
 # 0012: EL-miss composites BL-only (FEL menu still black screen)
 drivers/media/enhancement/amdolby_vision/amdv.c:bool el_missing = false;:1
-drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = true;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = req.dv_enhance_exist && toggle_mode == 1 && !el_flag;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = dv_inst[dv_id].el_halfsize_flag;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
 # Aggregate count, kept deliberately: 4 of these are pre-existing upstream
 # sites (amdv.c ~8452, ~8748, ~10078, ~11089) and only one is ours. It earns its
