@@ -1,0 +1,170 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: video: realign the EL queue to the BL before toggling
+
+amdv_parse_metadata_v2_stb() pairs each base-layer frame with whatever is at the
+head of the dvel queue. It does not compare pts - FLAG_CHECK_ES_PTS is not in
+dolby_vision_flags by default, so the check its code appears to make is compiled
+in but never taken. So one base-layer frame that goes through unpaired leaves the
+enhancement layer one frame behind for the rest of the title: every later
+composite is built from the wrong EL, and nothing on this chain puts it back.
+
+Measured on Avatar: Fire and Ash, 2026-09-07: exactly one "not found el" in five
+hours, at the menu->feature segment transition. Steady-state playback produces
+none. So this is not a timing problem to be waited out - it is a single
+accounting error at a segment boundary that then persists.
+
+The tree already has the right mechanism, in the wrong place.
+recv_common_dequeue_frame() (video_receiver.c) asks dvbldec and dveldec for their
+vf_put_count and drops the surplus EL frames before dequeuing the BL. That code
+is unreachable for a Blu-ray: a profile-7 FEL title is forced to
+STREAM_TYPE_STREAM, whose vfm chain is "dvbldec amlvideo deinterlace amvideo" and
+terminates in amvideo, not video_render. Confirmed on-box in /sys/class/vfm/map.
+So port it to the amvideo vsync path, at the same point relative to the dequeue.
+
+Arithmetic, not timing: no held vsyncs, no dropped BL frames, no way to starve
+the EL decoder. It fires only when bl_cnt > el_cnt, which is by definition a
+surplus, so if the counts never diverge it is inert. That matters, because the
+previous attempt at this bug tried to WAIT for the EL instead - which risked
+back-pressuring the shared HEVC core, and in the event could never fire at all,
+because vf_is_fel() requires a src_fmt the legacy h265 decoder never populates.
+
+Two details worth keeping:
+
+  - the format test accepts VFRAME_SIGNAL_FMT_INVALID, exactly as the
+    video_receiver.c original does. The legacy decoder driving this chain never
+    calls update_vframe_src_fmt(), so get_vframe_src_fmt() returns INVALID for
+    every frame here and a DOVI-only test would never match.
+
+  - the put-count query is req.vf == NULL, answered at
+    frame_provider/decoder/h265/vh265.c with atomic_read(&hevc->vf_put_count).
+    aux_size is seeded with 0xffffffff so a provider that does not implement the
+    query is detected rather than read as a count of zero.
+
+The drop is logged. There is no measurement yet of how often the counts actually
+diverge - only that they did once - so the log line is how we find out whether
+this is load-bearing or inert on real discs.
+
+Signed-off-by: SamuriHL <samurihl@msn.com>
+---
+--- a/drivers/media/video_sink/video.c
++++ b/drivers/media/video_sink/video.c
+@@ -908,6 +908,106 @@
+ 	return vf;
+ }
+ 
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++#ifndef DVEL_RECV_NAME
++#define DVEL_RECV_NAME "dvel"
++#endif
++
++/* Drop one surplus enhancement-layer frame.
++ *
++ * Lifted verbatim from video_receiver.c, where it is the back half of the only
++ * BL/EL realignment in the tree. That copy is unreachable here: it runs in
++ * recv_common_dequeue_frame(), i.e. the video_render receiver, and a profile-7
++ * FEL Blu-ray is forced to STREAM_TYPE_STREAM, whose vfm chain
++ * ("dvbldec amlvideo deinterlace amvideo") terminates in amvideo instead.
++ */
++static inline int recycle_dvel_vf_put(void)
++{
++	int event = 0, ret = 0;
++	struct vframe_s *vf = NULL;
++	struct vframe_provider_s *vfp = vf_get_provider(DVEL_RECV_NAME);
++
++	if (vfp) {
++		vf = vf_get(DVEL_RECV_NAME);
++		if (vf) {
++			vf_put(vf, DVEL_RECV_NAME);
++			event |= VFRAME_EVENT_RECEIVER_PUT;
++			vf_notify_provider(DVEL_RECV_NAME, event, NULL);
++			ret = 1;
++		}
++	}
++	return ret;
++}
++
++/* Re-pair the enhancement layer with the base layer before toggling.
++ *
++ * amdv_parse_metadata_v2_stb() takes whatever is at the head of the dvel queue
++ * for each BL, with no pts comparison (FLAG_CHECK_ES_PTS is not in
++ * dolby_vision_flags by default). So a single BL that goes through unpaired -
++ * measured once per disc, at the menu->feature segment transition - leaves the
++ * EL one frame behind for the REST of the title: every later composite is built
++ * from the wrong enhancement layer, and nothing on this chain corrects it.
++ *
++ * The decoders' own put counts say how far apart the layers are, so the fix is
++ * arithmetic rather than timing: drop the surplus. No held vsyncs, no dropped BL
++ * frames, no risk of starving the EL decoder - the failure mode of an earlier
++ * attempt that tried to WAIT for the EL instead, which additionally could never
++ * fire because vf_is_fel() requires a src_fmt this decoder never populates.
++ *
++ * Note the format test accepts VFRAME_SIGNAL_FMT_INVALID. That is deliberate and
++ * is what the video_receiver.c original does: the legacy h265 decoder driving
++ * this chain never calls update_vframe_src_fmt(), so get_vframe_src_fmt()
++ * returns INVALID for every frame here.
++ */
++static void dvel_realign_to_bl(struct vframe_s *vf)
++{
++	struct provider_aux_req_s req;
++	enum vframe_signal_fmt_e fmt;
++	u32 bl_cnt;
++	int i;
++
++	if (!vf || !is_amdv_enable())
++		return;
++
++	fmt = get_vframe_src_fmt(vf);
++	if (fmt != VFRAME_SIGNAL_FMT_DOVI &&
++	    fmt != VFRAME_SIGNAL_FMT_INVALID)
++		return;
++	if (!vf_peek(DVEL_RECV_NAME))
++		return;
++
++	/* req.vf == NULL is the put-count query: the decoder answers with
++	 * atomic_read(&hevc->vf_put_count) and returns. aux_size is seeded with
++	 * a sentinel so a provider that does not implement it is detected rather
++	 * than read as a count of zero.
++	 */
++	memset(&req, 0, sizeof(req));
++	req.aux_size = 0xffffffff;
++	vf_notify_provider_by_name("dvbldec",
++		VFRAME_EVENT_RECEIVER_GET_AUX_DATA, (void *)&req);
++	bl_cnt = req.aux_size;
++
++	memset(&req, 0, sizeof(req));
++	req.aux_size = 0xffffffff;
++	vf_notify_provider_by_name("dveldec",
++		VFRAME_EVENT_RECEIVER_GET_AUX_DATA, (void *)&req);
++
++	if (req.aux_size == 0xffffffff || bl_cnt == 0xffffffff ||
++	    bl_cnt <= req.aux_size)
++		return;
++
++	i = bl_cnt - req.aux_size;
++	pr_info("dvel: bl %u el %u - dropping %d surplus el frame(s)\n",
++		bl_cnt, req.aux_size, i);
++	while (i > 0) {
++		if (!recycle_dvel_vf_put())
++			break;
++		i--;
++	}
++}
++#endif
++
++
+ inline struct vframe_s *amvideo_vf_get(void)
+ {
+ 	struct vframe_s *vf = NULL;
+@@ -3943,6 +4043,12 @@
+ 			if (performance_debug & DEBUG_FLAG_VSYNC_PROCESS_TIME)
+ 				do_gettimeofday(&cur_line_info->end2);
+ 
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++			/* the BL is about to be toggled - make sure the EL that will be
++			 * paired with it in the parse is actually its own
++			 */
++			dvel_realign_to_bl(vf);
++#endif
+ 			vf = amvideo_vf_get();
+ 			if (!vf) {
+ 				ATRACE_COUNTER(MODULE_NAME,  __LINE__);

@@ -88,3 +88,10 @@ drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
 # - but upstream churn will move it, so read the sites before editing the number.
 drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
 
+
+# 0013: realign the EL queue to the BL before toggling (port of
+# recycle_dvel_vf_put from video_receiver.c, which this chain never reaches)
+drivers/media/video_sink/video.c:static void dvel_realign_to_bl(struct vframe_s *vf):1
+drivers/media/video_sink/video.c:static inline int recycle_dvel_vf_put(void):1
+drivers/media/video_sink/video.c:dvel_realign_to_bl(vf);:1
+drivers/media/video_sink/video.c:dropping %d surplus el frame(s):1
