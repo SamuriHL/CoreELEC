@@ -82,3 +82,11 @@ drivers/media/enhancement/amdolby_vision/amdv.c:bool el_missing = false;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = true;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
 drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
+
+# 0013: hold a dual-layer BL frame until its EL is queued (v2 path had no wait)
+drivers/media/enhancement/amdolby_vision/amdv.h:unsigned int el_wait_count;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_el_wait_max, uint, 0664);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:} else if (!dv_inst[dv_id].el_wait_giveup) {:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dv_inst[i].el_wait_giveup = false;:2
+drivers/media/enhancement/amdolby_vision/amdv.c:el queue still empty after %u vsyncs:1
+drivers/media/enhancement/amdolby_vision/amdv.c:static uint amdv_el_wait_max = 2;:1
