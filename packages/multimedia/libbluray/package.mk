@@ -46,8 +46,15 @@ PKG_MESON_OPTS_TARGET="-Ddefault_library=shared \
 # its EXACT version; the tools.jre.zulu addon carries jars for older
 # libbluray, and its LIBBLURAY_CP override is handled by the
 # libbluray-03-bdj-fallback patch so stale addon jars can no longer kill
-# BD-J. Jars are arch-independent, built from this same source tree
-# (meson -Dbdj_jar=enabled + ant, JDK 21). Rebuild on every version bump.
+# BD-J. Jars are arch-independent and built from this same source tree by
+# rebuild-bdj-jars.sh, which needs a real JDK 8: the BD-J tree overrides
+# JDK-internal classes and calls methods that later releases removed, so a
+# modern javac with -source/-target 1.8 emits the right bytecode version while
+# still resolving against its own platform classes. They are NOT built by the
+# image build - the copy below is verbatim - so a patch touching
+# src/libbluray/bdj/**/*.java changes NOTHING until the jars are rebuilt and
+# committed. Rebuild on a version bump AND on every Java-side patch, then
+# assert the change is in the artifact, not just in the patched source.
 post_makeinstall_target() {
   mkdir -p ${INSTALL}/usr/share/java
   cp ${PKG_DIR}/jars/libbluray-j2se-${PKG_VERSION}.jar \
