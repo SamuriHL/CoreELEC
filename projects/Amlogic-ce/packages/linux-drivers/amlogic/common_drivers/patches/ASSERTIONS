@@ -76,3 +76,9 @@ drivers/media/enhancement/amdolby_vision/amdv.c:sets ll_policy = LL_YUV422 whene
 
 # --- negative control: proves the assertion mechanism can actually fail ------
 drivers/media/enhancement/amdolby_vision/amdv.c:zzz_this_string_must_never_exist:0
+
+# 0012: EL-miss composites BL-only (FEL menu still black screen)
+drivers/media/enhancement/amdolby_vision/amdv.c:bool el_missing = false;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:el_missing = true;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:if (el_missing) {:1
+drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
