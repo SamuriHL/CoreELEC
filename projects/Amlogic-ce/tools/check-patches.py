@@ -43,6 +43,35 @@ HUNK_RE = re.compile(r'@@ -(\d+),(\d+) \+(\d+),(\d+) @@')
 FILE_HDR = ('--- ', '+++ ', 'diff ')
 
 
+SIG_VERSION_RE = re.compile(r'^\d+(\.\d+)+')
+
+
+def is_git_signature(lines, j):
+    """True if lines[j] starts git format-patch's "-- \n<version>" trailer.
+
+    `git format-patch` ends every patch with an RFC 3676 signature delimiter -
+    a line that is exactly "-- " - followed by the git version. That line
+    begins with '-', so a naive body scan counts it as a DELETED line and every
+    such patch reports one more old line than its header declares. Five of this
+    tree's libbluray patches tripped that, all off by exactly +1, and a checker
+    that cries wolf on ordinary git output is a checker people learn to ignore.
+
+    Kept deliberately narrow. A genuinely deleted line whose content is "- "
+    also renders as "-- ", so the delimiter only counts as a trailer when what
+    follows looks like git's version line (optionally after blanks, or at EOF).
+    """
+    if lines[j] != '-- ':
+        return False
+    for k in range(j + 1, len(lines)):
+        if lines[k] == '':
+            continue
+        return bool(SIG_VERSION_RE.match(lines[k]))
+    # "-- " with nothing after it: git always writes the version line, so this
+    # is a deleted line of content "- ", not a trailer. Counting it as a
+    # trailer here would UNDER-count the body and invent a mismatch.
+    return False
+
+
 def hunks(lines):
     """Yield (index, declared_old, declared_new, body) for each hunk."""
     i = 0
@@ -56,6 +85,8 @@ def hunks(lines):
         while j < len(lines):
             line = lines[j]
             if line.startswith('@@') or line.startswith(FILE_HDR):
+                break
+            if is_git_signature(lines, j):
                 break
             if not (line.startswith(('-', '+', ' ')) or line == ''):
                 break
