@@ -1,0 +1,112 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: composite BL-only when the EL for a picture never arrives
+
+A profile-7 FEL Blu-ray menu still goes black about a second after it is drawn,
+keeps its audio, and comes back on any keypress. Measured three times on
+Avatar: Fire and Ash. It predates this tree - it reproduces on release
+20260906094636.
+
+At the still the base layer emits its last picture before the enhancement layer
+surfaces its partner, so dvel_vf_get() returns NULL and the EL block falls
+through to the "not found el" arm. Two things then disagree:
+
+  - video_func loses the frame's cur_dispbuf2, so dvel_swap_frame(NULL) sets
+    need_disable_vd[1] and the EL layer is switched off - observed 138-141us
+    after the error as "VID: VD1 off with async true".
+
+  - el_flag is set unconditionally a few lines later from req.dv_enhance_exist,
+    which vh265 forces to 1 for every frame of a frame-based dual-layer stream
+    (vh265.c:9833). It is latched into dv_inst[].el_flag and pushed to the blob
+    on every update, so core1a is left configured to composite an enhancement
+    layer whose source layer is off. That composite is black.
+
+Nothing recovers it because a still leaves toggle_mode at 0 (video_func.c:648),
+so the frame is never re-toggled and the latched setting stands until new
+content arrives - which is exactly what a keypress produces.
+
+Everything reads healthy while the screen is black, which is what made this hard
+to find: both decoders at matching frame counts with no drops, plane enabled,
+disable_video 0, core1a on, dv_mode IPT_TUNNEL, HPD 1, avmute 0, and
+/sys/class/video/frame_width reporting a live 3840 rather than "NA", so a good
+frame really is committed to an enabled layer. The inconsistency is between
+el_flag and a layer-enable bit and neither is visible in any of those. What does
+show it is
+    echo dv_el > /sys/class/amdolby_vision/debug
+which prints new_m_dovi_setting.input[].el_flag - the value most recently handed
+to the core. Taken while black it reads "inst0: el_flag: 1" with VID: VD1
+already off.
+
+Clear el_flag for that picture so the core composites base-layer-only, which is
+what the already-disabled EL layer implies. This follows the existing idiom
+immediately below, where el_flag is cleared when enable_mel/enable_fel refuse
+the layer. It is per-frame: the next picture that pairs normally restores dual
+layer, so ordinary playback sees at most a one-frame BL-only composite where it
+currently sees a mismatch that the following frame papers over.
+
+el_halfsize_flag must be cleared with it. It is initialised to 1 and cleared
+only at the vf->width == el_vf->width test on the paired path, which needs a
+non-NULL el_vf. Clearing el_flag alone therefore tells the core "no enhancement
+layer" and "the enhancement layer is half size" at once, and the first build to
+carry only the el_flag half rendered the menu with a green background instead of
+black - visible, but a malformed composite.
+
+Deliberately not setting amdv_el_disable here, unlike the enable_fel case. It is
+reset only in dv_vf_reg_provider/dv_vf_light_reg_provider, so it is sticky for
+the rest of the title and would disable the enhancement layer entirely after one
+transient miss.
+
+The deeper cause is that this SoC's wait path never holds the BL for its EL at
+all: amdv_wait_metadata_v1 has a dual-layer block (is_dovi_dual_layer_frame ->
+dvel_vf_peek -> return 1 to wait) and amdv_wait_metadata_v2, which multi_dv_mode
+uses, has no equivalent - is_dovi_dual_layer_frame has exactly one call site
+tree-wide. Porting that block is not done here: with FLAG_CHECK_ES_PTS clear
+(the default) it degenerates to "is the EL queue empty", which cannot tell "the
+EL arrives next vsync" from "the EL will never arrive", and the still is the
+latter. Unbounded it would hold every vsync forever - which would look like a
+fix, because the previous frame would stay on screen. That needs a vsync bound,
+a VD1/instance-0 gate, and a MEL exclusion before it can be considered.
+
+Not addressed, and unreachable as configured: on the pts-mismatch arm of the
+same branch el_vf is taken by dvel_vf_get() and never returned with
+dvel_vf_put(). FLAG_CHECK_ES_PTS is not in the default dolby_vision_flags, so a
+non-NULL el_vf always takes the paired branch and that arm is dead code.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -9681,6 +9681,7 @@
+ 	bool dv_vsem = false;
+ 	bool el_flag = 0;
+ 	bool el_halfsize_flag = 1;
++	bool el_missing = false;
+ 	u32 w = 0xffff;
+ 	u32 h = 0xffff;
+ 	int meta_flag_bl = 1;
+@@ -10052,6 +10053,7 @@
+ 					("bl(%p-%lld) not found el(%p-%lld)\n",
+ 					 vf, vf->pts_us64,
+ 					 el_vf, el_vf->pts_us64);
++				el_missing = true;
+ 			}
+ 		} else if (toggle_mode == 1) {
+ 			if (debug_dolby & 2)
+@@ -10063,6 +10065,20 @@
+ 		if (req.dv_enhance_exist)
+ 			el_flag = 1;
+ 
++		/* No EL for this picture: the EL layer has already been switched
++		 * off, so leaving el_flag set asks core1a to composite an
++		 * enhancement layer that has no source, and that composite is
++		 * black. el_halfsize_flag has to go with it - it is cleared only
++		 * on the paired path, so a BL-only composite would otherwise
++		 * still be told the absent EL is half size, which renders green.
++		 * A still never re-toggles the frame, so either state would hold
++		 * until new content arrives.
++		 */
++		if (el_missing) {
++			el_flag = 0;
++			el_halfsize_flag = 0;
++		}
++
+ 		if (toggle_mode != 2) {
+ 			if (!drop_flag) {
+ 				dv_inst[dv_id].last_total_md_size = total_md_size;
