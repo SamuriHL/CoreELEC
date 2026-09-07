@@ -19,7 +19,8 @@ PKG_SITE="https://www.videolan.org/developers/libbluray.html"
 # Switching to the release tarball means taking upstream's patch pair with it,
 # and testing the resulting disc path - a change of its own, not a drive-by.
 PKG_URL="https://code.videolan.org/videolan/${PKG_NAME}/-/archive/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.gz"
-PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread"
+PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread apache-ant:host"
+PKG_DEPENDS_UNPACK="jdk-${MACHINE_HARDWARE_NAME}-zulu"
 PKG_LONGDESC="libbluray is an open-source library designed for Blu-Ray Discs playback for media players."
 
 if [ "${BLURAY_AACS_SUPPORT}" = "yes" ]; then
@@ -35,29 +36,34 @@ PKG_MESON_OPTS_TARGET="-Ddefault_library=shared \
                        -Denable_tools=false \
                        -Denable_devtools=false \
                        -Denable_examples=false \
-                       -Dbdj_jar=disabled \
+                       -Dbdj_jar=enabled \
                        -Dembed_udfread=true \
                        -Dfontconfig=enabled \
                        -Dfreetype=enabled \
                        -Dlibxml2=enabled"
 
-# Ship the version-matched BD-J jars in the image (/usr/share/java is in
-# libbluray's default jar search list). The native lib only loads the jar of
-# its EXACT version; the tools.jre.zulu addon carries jars for older
-# libbluray, and its LIBBLURAY_CP override is handled by the
-# libbluray-03-bdj-fallback patch so stale addon jars can no longer kill
-# BD-J. Jars are arch-independent and built from this same source tree by
-# rebuild-bdj-jars.sh, which needs a real JDK 8: the BD-J tree overrides
-# JDK-internal classes and calls methods that later releases removed, so a
-# modern javac with -source/-target 1.8 emits the right bytecode version while
-# still resolving against its own platform classes. They are NOT built by the
-# image build - the copy below is verbatim - so a patch touching
-# src/libbluray/bdj/**/*.java changes NOTHING until the jars are rebuilt and
-# committed. Rebuild on a version bump AND on every Java-side patch, then
-# assert the change is in the artifact, not just in the patched source.
-post_makeinstall_target() {
-  mkdir -p ${INSTALL}/usr/share/java
-  cp ${PKG_DIR}/jars/libbluray-j2se-${PKG_VERSION}.jar \
-     ${PKG_DIR}/jars/libbluray-awt-j2se-${PKG_VERSION}.jar \
-     ${INSTALL}/usr/share/java/
+# Build the BD-J jars from this same (patched) source tree on every build and
+# let meson install them to /usr/share/java, which is in libbluray's default
+# jar search list. The native lib only loads the jar of its EXACT version.
+#
+# These used to be prebuilt artifacts committed under jars/ and copied verbatim
+# here, which meant a patch touching src/libbluray/bdj/**/*.java applied to the
+# source and then shipped nothing. Two patches sat inert that way for weeks.
+# There is deliberately no prebuilt copy any more: nothing that can go stale.
+#
+# The jars MUST be built by a real JDK 8. The BD-J tree overrides JDK-internal
+# classes (java.io.BDFileSystem hooks java.io.File, the java.awt peers) and
+# calls methods later releases removed, so a modern javac with -source/-target
+# 1.8 emits the right bytecode version while still resolving against its own
+# platform classes - not equivalent. libbluray's own meson picks the oldest
+# -source its javac still supports (1.4 under JDK 8), so the toolchain also
+# decides the bytecode level; pinning JDK 8 pins that too.
+#
+# jdk-${MACHINE_HARDWARE_NAME}-zulu is the same Zulu 8 the tools.jre.zulu addon
+# ships as the runtime, so the jars are built and executed by the same Java.
+pre_configure_target() {
+  local _jdk="$(get_build_dir jdk-${MACHINE_HARDWARE_NAME}-zulu)"
+  export JAVA_HOME="${_jdk}"
+  export PATH="${_jdk}/bin:${PATH}"
+  PKG_MESON_OPTS_TARGET+=" -Djdk_home=${_jdk}"
 }
