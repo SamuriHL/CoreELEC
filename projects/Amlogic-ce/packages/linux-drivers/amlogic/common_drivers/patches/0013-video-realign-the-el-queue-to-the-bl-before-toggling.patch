@@ -48,7 +48,7 @@ Signed-off-by: SamuriHL <samurihl@msn.com>
 ---
 --- a/drivers/media/video_sink/video.c
 +++ b/drivers/media/video_sink/video.c
-@@ -908,6 +908,106 @@
+@@ -908,6 +908,114 @@
  	return vf;
  }
  
@@ -141,7 +141,15 @@ Signed-off-by: SamuriHL <samurihl@msn.com>
 +		return;
 +
 +	i = bl_cnt - req.aux_size;
-+	pr_info("dvel: bl %u el %u - dropping %d surplus el frame(s)\n",
++	/*
++	 * This runs from the vsync hard-IRQ, once per vsync. Any state where the
++	 * base layer stays ahead of a non-empty enhancement queue therefore
++	 * prints 50-120 lines a second on a release build - the function this
++	 * was lifted from (video_receiver.c) carries no log line at all.
++	 * Rate-limited so it still says what happened without becoming the
++	 * fault it is reporting.
++	 */
++	pr_info_ratelimited("dvel: bl %u el %u - dropping %d surplus el frame(s)\n",
 +		bl_cnt, req.aux_size, i);
 +	while (i > 0) {
 +		if (!recycle_dvel_vf_put())
