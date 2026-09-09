@@ -21,6 +21,17 @@ PKG_SITE="https://www.videolan.org/developers/libbluray.html"
 PKG_URL="https://code.videolan.org/videolan/${PKG_NAME}/-/archive/${PKG_VERSION}/${PKG_NAME}-${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain fontconfig freetype libxml2 libudfread apache-ant:host"
 PKG_DEPENDS_UNPACK="jdk-${MACHINE_HARDWARE_NAME}-zulu"
+# PKG_DEPENDS_UNPACK does NOT feed calculate_stamp - it hashes $PKG_DIR, the
+# patch dirs and PKG_NEED_UNPACK only. Without this, bumping the Zulu JDK or
+# apache-ant leaves libbluray's deephash unchanged, the build is skipped, and
+# the PREVIOUSLY BUILT jar is reinstalled into the image with nobody told:
+# the "patches sat inert for weeks" failure, one level up. Worse, build.xml's
+# chain is dist -> compile -> init with no clean, ${build} is meson's
+# persistent @PRIVATE_DIR@, and <javac> is incremental - so a surviving build
+# dir across a JDK change repacks stale .class files into a jar mixing class
+# file versions, which throws UnsupportedClassVersionError on the box's Zulu 8
+# runtime. Same idiom as packages/graphics/glu/package.mk.
+PKG_NEED_UNPACK="$(get_pkg_directory jdk-${MACHINE_HARDWARE_NAME}-zulu) $(get_pkg_directory apache-ant)"
 PKG_LONGDESC="libbluray is an open-source library designed for Blu-Ray Discs playback for media players."
 
 if [ "${BLURAY_AACS_SUPPORT}" = "yes" ]; then
