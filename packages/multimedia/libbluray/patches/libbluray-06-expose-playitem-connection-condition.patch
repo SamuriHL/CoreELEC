@@ -1,0 +1,40 @@
+Expose the playitem's connection_condition on BLURAY_CLIP_INFO.
+
+MPLS carries a connection_condition per playitem: 5 and 6 are the
+seamless-authored connections, where the outgoing clip's last PES is
+guaranteed complete and the incoming clip's first access unit begins at an
+aligned unit. 1 is the non-seamless glue used by menu stubs and chapter
+chains, where the authoring explicitly permits the outgoing clip's last PES
+to be truncated mid-body.
+
+libbluray already knows the difference - it decides CONNECT_SEAMLESS vs
+CONNECT_NON_SEAMLESS from this very field in navigation.c and queues
+BD_EVENT_DISCONTINUITY for the latter - but a player cannot read it. The
+event is no substitute: it is queued BEHIND BD_EVENT_PLAYITEM, so it arrives
+only after the player has already had to decide how to handle the boundary.
+
+Kodi needs it up front to choose between gliding a seamless seam (keeping the
+transport stream running so the incoming clip's first access unit is not
+amputated) and holding a non-seamless one (so the truncated tail can be
+flushed). Purely additive: one field appended to the struct.
+
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -264,6 +264,7 @@
+     uint32_t           pkt_count;               /**< Number of mpeg-ts packets */
+     uint8_t            still_mode;              /**< Clip still mode (\ref bd_still_mode_e) */
+     uint16_t           still_time;              /**< Still time (seconds) if still_mode == BD_STILL_TIME */
++    uint8_t            connection_condition;    /**< MPLS playitem connection_condition: 5/6 seamless, 1 non-seamless */
+     uint8_t            video_stream_count;      /**< Number of video streams */
+     uint8_t            audio_stream_count;      /**< Number of audio streams */
+     uint8_t            pg_stream_count;         /**< Number of PG (Presentation Graphics) streams */
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -2995,6 +2995,7 @@
+             ci->out_time = (uint64_t)pi->out_time * 2;
+             ci->still_mode = pi->still_mode;
+             ci->still_time = pi->still_time;
++            ci->connection_condition = pi->connection_condition;
+             ci->video_stream_count = pi->stn.num_video;
+             ci->audio_stream_count = pi->stn.num_audio;
+             ci->pg_stream_count = pi->stn.num_pg + pi->stn.num_pip_pg;
