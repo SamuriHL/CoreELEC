@@ -19,6 +19,18 @@ maximum-luminance field handed to the control path down to the stream's own
 source_max_pq (the ETSI base block at md_buf[66..67]). Never raises it, so a
 title graded above the panel is unaffected.
  
+RUNTIME SWITCH, DEFAULT OFF (2026-09-10). The cap now runs only while the
+module param amdv_lldv_vsvdb_cap is set. avdvplus R10 keeps the same cap but
+gates it on !amdv_multi_dv_mode, so it never runs on the 5.15 CMv4.0 engine -
+its dovi5.ko is byte-identical, after its own shim patching, to the dovi.ko
+this build loads. A Dolby Vision author confirmed the reason: the EDID limit
+to the content's mastering peak worked around CMv2.9 LLDV bugs that the
+CMv4.0 LLDV engine does not have. The on-box report above was taken the same
+day the blob's positive-trim clamp under non-zero L5 was found, so it is not
+proof the cap is needed on this engine. Default off = R10 parity; write 1 to
+/sys/module/aml_media/parameters/amdv_lldv_vsvdb_cap to A/B it during LLDV
+playback (the gate is re-evaluated on every control-path run).
+ 
 This edits only new_m_dovi_setting.vsvdb_tbl - the in-memory copy passed to
 multi_control_path. It deliberately does NOT touch force_vsvdb/vsvdb_data:
 that path re-latches the EDID, which blanks the sink for seconds mid-playback
@@ -71,7 +83,24 @@ One thing this does NOT establish, stated rather than assumed:
  
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -11157,6 +11157,74 @@
+@@ -243,6 +243,16 @@
+ 
+ u32 last_dolby_vision_ll_policy = DOLBY_VISION_LL_DISABLE;
+ 
++/* Runtime switch for the LLDV VSVDB peak cap in the multi control path.
++ * OFF by default, matching avdvplus R10: its copy of the cap runs only on
++ * the legacy CMv2.9 LLDV engine and is skipped on the 5.15 CMv4.0 engine -
++ * the only one this build ships. Kept switchable so the two behaviours can
++ * be A/B'd live during playback without a rebuild.
++ */
++static bool amdv_lldv_vsvdb_cap;
++module_param(amdv_lldv_vsvdb_cap, bool, 0664);
++MODULE_PARM_DESC(amdv_lldv_vsvdb_cap, "\n amdv_lldv_vsvdb_cap\n");
++
+ #ifdef V2_4_3
+ #define DOLBY_VISION_STD_RGB_TUNNEL	0
+ #define DOLBY_VISION_STD_YUV422		1
+@@ -11184,6 +11194,79 @@
  	}
  	new_m_dovi_setting.input[IPCORE2_ID].valid = 1;
  
@@ -79,6 +108,10 @@ One thing this does NOT establish, stated rather than assumed:
 +	 * the content's own mastering peak - otherwise low-peak titles get so
 +	 * much headroom that the trims map to nothing. Ported from avdvplus R9.
 +	 * In-memory table only; never the EDID (that re-latch blanks the sink).
++	 *
++	 * Gated on amdv_lldv_vsvdb_cap (default OFF): avdvplus R10 gates its own
++	 * copy on !amdv_multi_dv_mode, so it never runs on this 5.15 CMv4.0
++	 * engine, whose LLDV path does not have the CMv2.9 bugs it worked around.
 +	 *
 +	 * dst_format is checked as well as the LL policy: CoreELEC 5591768488 now
 +	 * sets ll_policy = LL_YUV422 whenever the SINK cannot do DV, not only for
@@ -88,7 +121,8 @@ One thing this does NOT establish, stated rather than assumed:
 +	 * directly through amdv_update_vsvdb_config and bypasses the EDID check),
 +	 * where there is no LLDV output and the sink VSVDB is not the DM's target.
 +	 */
-+	if (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
++	if (amdv_lldv_vsvdb_cap &&
++	    dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 &&
 +	    dst_format == FORMAT_DOVI &&
 +	    new_m_dovi_setting.vsvdb_len >= 8) {
 +		static u16 last_logged_idx = 0xffff;
@@ -146,4 +180,3 @@ One thing this does NOT establish, stated rather than assumed:
  	if (debug_dolby & 0x400)
  		do_gettimeofday(&start);
  
-
