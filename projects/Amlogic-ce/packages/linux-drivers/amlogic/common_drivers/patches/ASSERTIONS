@@ -48,6 +48,11 @@ drivers/media/enhancement/amdolby_vision/amdv.c:LLDV: vsvdb peak capped:1
 # patch header: its static cache could suppress a needed re-latch after an
 # EDID re-read, which is the exact failure the patch exists to prevent).
 drivers/media/enhancement/amdolby_vision/amdv.c:last_vsvdb_tbl:0
+# ...and it is a runtime switch, OFF by default (avdvplus R10 parity: R10 never
+# runs this cap on the 5.15 CMv4.0 engine). Assert the gate AND the declaration
+# without an initialiser - a stray '= true' would silently re-enable the cap.
+drivers/media/enhancement/amdolby_vision/amdv.c:if (amdv_lldv_vsvdb_cap &&:1
+drivers/media/enhancement/amdolby_vision/amdv.c:static bool amdv_lldv_vsvdb_cap;:1
 
 # --- 0009: consumer IEC60958 channel status for multi-channel LPCM -----------
 sound/soc/amlogic/auge/tdm.c:MULTI_LPCM:2
