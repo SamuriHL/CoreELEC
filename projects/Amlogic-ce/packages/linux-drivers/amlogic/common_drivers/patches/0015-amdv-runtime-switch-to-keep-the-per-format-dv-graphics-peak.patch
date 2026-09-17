@@ -1,0 +1,73 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: runtime switch to keep the per-format DV graphics peak
+
+84c1fdbb12 made FLAG_USE_SINK_MIN_MAX the default, which also replaces the
+graphics (OSD/GUI) peak and min with the sink's VSVDB/HDR values - on an LG G6
+the DV GUI graphics peak goes from the table's 300 nits to ~2485. Add
+amdv_graphics_from_sink (default Y = upstream behaviour); N restores the
+per-format graphics table values after the sink block, as before the flag was
+on. The content target luminance keeps following the sink either way.
+
+A nonzero amdv_graphic_max (Kodi's VS10 HDR10 OSD brightness slider) now wins
+over the sink value too; with the flag on it was silently overridden.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -432,6 +432,15 @@
+ module_param(amdv_graphic_max, uint, 0664);
+ MODULE_PARM_DESC(amdv_graphic_max, "\n amdv_graphic_max\n");
+ 
++/* Under FLAG_USE_SINK_MIN_MAX the graphics (OSD) peak/min follow the sink's
++ * VSVDB/HDR metadata. 0 keeps the per-format graphics table (DV: 300 nits) as
++ * before that flag was the default; the content target still follows the sink.
++ * A nonzero amdv_graphic_max always wins.
++ */
++static bool amdv_graphics_from_sink = true;
++module_param(amdv_graphics_from_sink, bool, 0664);
++MODULE_PARM_DESC(amdv_graphics_from_sink, "\n amdv_graphics_from_sink\n");
++
+ /* user overrides for the DM target on the STB control path.
+  * 0 = off (use built-in amdv_target_min / amdv_target_max).
+  * min override in 1/10000 nit (50 = 0.005 nit), max override in nits.
+@@ -9083,6 +9092,9 @@
+ 	}
+ 
+ 	if (dolby_vision_flags & FLAG_USE_SINK_MIN_MAX) {
++		const u32 fmt_graphic_min = graphic_min;
++		const u32 fmt_graphic_max = graphic_max;
++
+ 		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+@@ -9143,6 +9155,10 @@
+ 			       amdv_default_max,
+ 			       sizeof(amdv_target_max));
+ 		}
++		if (!amdv_graphics_from_sink || amdv_graphic_max) {
++			graphic_min = fmt_graphic_min;
++			graphic_max = fmt_graphic_max;
++		}
+ 	}
+ 
+ 	if (is_osd_off[0]) {
+@@ -10671,6 +10687,9 @@
+ 	last_dst_format = dst_format;
+ 
+ 	if (dolby_vision_flags & FLAG_USE_SINK_MIN_MAX) {
++		const u32 fmt_graphic_min = graphic_min;
++		const u32 fmt_graphic_max = graphic_max;
++
+ 		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+@@ -10730,6 +10749,10 @@
+ 			       amdv_default_max,
+ 			       sizeof(amdv_target_max));
+ 		}
++		if (!amdv_graphics_from_sink || amdv_graphic_max) {
++			graphic_min = fmt_graphic_min;
++			graphic_max = fmt_graphic_max;
++		}
+ 	}
+ 
+ 	if (is_osd_off[0] && !multi_dv_mode) {
