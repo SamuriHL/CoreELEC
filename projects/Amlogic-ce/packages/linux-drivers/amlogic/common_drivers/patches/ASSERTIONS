@@ -107,3 +107,7 @@ drivers/media/enhancement/amdolby_vision/amdv.c:dv_vsvdb_v2_max_nits:3
 drivers/media/enhancement/amdolby_vision/amdv.c:dv_vsvdb_v2_min_lum:3
 drivers/media/enhancement/amdolby_vision/amdv.c:2485, 2876, 3330:1
 drivers/media/enhancement/amdolby_vision/amdv.c:* 50 + 100);:2
+# 0015: graphics peak can be kept off the sink at both FLAG_USE_SINK_MIN_MAX sites
+drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_graphics_from_sink, bool, 0664);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:const u32 fmt_graphic_max = graphic_max;:2
+drivers/media/enhancement/amdolby_vision/amdv.c:if (!amdv_graphics_from_sink || amdv_graphic_max) {:2
