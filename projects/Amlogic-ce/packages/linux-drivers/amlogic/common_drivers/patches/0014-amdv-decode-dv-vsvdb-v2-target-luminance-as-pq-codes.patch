@@ -1,0 +1,92 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: decode Dolby VSVDB v2 target min/max as PQ codes
+
+84c1fdbb12 ("amdv: parse DV VSVDB v2 target min/max luminance") enabled
+FLAG_USE_SINK_MIN_MAX by default and added a ver == 2 branch that applies the
+v1 formulas (max = 100 + 50 * CV nits, min = (CV/127)^2 nits) to the v2
+tmaxPQ/tminPQ fields. hdmitx_edid_parse.c stores those as the raw 5-bit
+fields (dat >> 3), and in VSVDB v2 they index 12-bit PQ code values:
+max PQ = 2055 + 65 * idx, min PQ = 20 * idx. That is how linuxtv edid-decode
+decodes v2 ("Target Max PQ v2"), and it matches what dovi.ko's own VSVDB
+handling does with the same bytes.
+
+Example, LG G6 VSVDB eb0146d000 4802b67e6c867c: max idx 22 = PQ 3485 = ~2485
+nits; the v1 formula gave 1200. With the flag on that value replaces every
+amdv_target_max entry, graphic_max/min and amdv_target_min, so it reaches the
+VS10 DV->HDR10 target and the OSD graphics peak.
+
+Keep the flag and the v2 branch; convert through precomputed ST 2084 tables
+(no float in the kernel) at both sites.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -407,6 +407,23 @@
+ 	{ 600, 1000, 100 },  /* SDR =>  DV/HDR/SDR */
+ };
+ 
++/* Dolby VSVDB v2 target luminance. Unlike v1 (max = 100 + 50 * CV nits,
++ * min = (CV / 127)^2 nits), the v2 5-bit fields index 12-bit PQ codes:
++ * max PQ = 2055 + 65 * idx, min PQ = 20 * idx (as edid-decode decodes them).
++ * Pre-converted through the ST 2084 EOTF since the kernel has no float.
++ */
++static const u32 dv_vsvdb_v2_max_nits[32] = { /* nits */
++	94, 110, 129, 150, 175, 204, 237, 276, 320, 372, 431,
++	499, 578, 670, 775, 897, 1037, 1200, 1387, 1605, 1856, 2147,
++	2485, 2876, 3330, 3857, 4470, 5183, 6014, 6982, 8113, 9434
++};
++
++static const u32 dv_vsvdb_v2_min_lum[32] = { /* 0.0001 nits */
++	0, 6, 22, 47, 83, 129, 188, 260, 347, 449, 569,
++	707, 865, 1044, 1247, 1475, 1729, 2012, 2325, 2671, 3052, 3470,
++	3927, 4427, 4972, 5564, 6206, 6902, 7655, 8468, 9345, 10289
++};
++
+ static unsigned int amdv_graphic_min = 50; /* 0.0001 */
+ static unsigned int amdv_graphic_max; /* 100 */
+ static unsigned int old_amdv_graphic_max;
+@@ -9085,17 +9102,15 @@
+ 				}
+ 			} else if (vinfo->vout_device->dv_info->ver == 2) {
+ 				if (vinfo->vout_device->dv_info->tmaxPQ) {
+-					/* Target max luminance = 100+50*CV, CV range 0-31 (5-bit field) */
++					/* v2 fields are PQ code indices, not luminance */
+ 					graphic_max =
+ 					target_lumin_max =
+-					(vinfo->vout_device->dv_info->tmaxPQ
+-						* 50 + 100);
+-					/* Target min luminance = (CV/127)^2, CV range 0-31 (5-bit field) */
++					dv_vsvdb_v2_max_nits
++						[vinfo->vout_device->dv_info->tmaxPQ & 0x1f];
+ 					graphic_min =
+ 					amdv_target_min =
+-					(vinfo->vout_device->dv_info->tminPQ *
+-					vinfo->vout_device->dv_info->tminPQ) *
+-					10000 / (127 * 127);
++					dv_vsvdb_v2_min_lum
++						[vinfo->vout_device->dv_info->tminPQ & 0x1f];
+ 				}
+ 			}
+ 		} else if (sink_hdr_support(vinfo) & HDR_SUPPORT) {
+@@ -10674,17 +10689,15 @@
+ 				}
+ 			} else if (vinfo->vout_device->dv_info->ver == 2) {
+ 				if (vinfo->vout_device->dv_info->tmaxPQ) {
+-					/* Target max luminance = 100+50*CV, CV range 0-31 (5-bit field) */
++					/* v2 fields are PQ code indices, not luminance */
+ 					graphic_max =
+ 					target_lumin_max =
+-					(vinfo->vout_device->dv_info->tmaxPQ
+-						* 50 + 100);
+-					/* Target min luminance = (CV/127)^2, CV range 0-31 (5-bit field) */
++					dv_vsvdb_v2_max_nits
++						[vinfo->vout_device->dv_info->tmaxPQ & 0x1f];
+ 					graphic_min =
+ 					amdv_target_min =
+-					(vinfo->vout_device->dv_info->tminPQ *
+-					vinfo->vout_device->dv_info->tminPQ) *
+-					10000 / (127 * 127);
++					dv_vsvdb_v2_min_lum
++						[vinfo->vout_device->dv_info->tminPQ & 0x1f];
+ 				}
+ 			}
+ 		} else if (sink_hdr_support(vinfo) & HDR_SUPPORT) {
