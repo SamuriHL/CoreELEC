@@ -100,3 +100,10 @@ drivers/media/video_sink/video.c:static void dvel_realign_to_bl(struct vframe_s 
 drivers/media/video_sink/video.c:static inline int recycle_dvel_vf_put(void):1
 drivers/media/video_sink/video.c:dvel_realign_to_bl(vf);:1
 drivers/media/video_sink/video.c:dropping %d surplus el frame(s):1
+# 0014: VSVDB v2 target luminance decoded as PQ codes at both parse sites; the v1
+# "* 50 + 100" formula must remain only in the two v1 branches
+drivers/media/enhancement/amdolby_vision/amdv.c:static const u32 dv_vsvdb_v2_max_nits[32] = { /* nits */:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dv_vsvdb_v2_max_nits:3
+drivers/media/enhancement/amdolby_vision/amdv.c:dv_vsvdb_v2_min_lum:3
+drivers/media/enhancement/amdolby_vision/amdv.c:2485, 2876, 3330:1
+drivers/media/enhancement/amdolby_vision/amdv.c:* 50 + 100);:2
