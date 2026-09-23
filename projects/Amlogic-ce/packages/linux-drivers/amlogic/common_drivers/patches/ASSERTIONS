@@ -111,3 +111,11 @@ drivers/media/enhancement/amdolby_vision/amdv.c:* 50 + 100);:2
 drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_graphics_from_sink, bool, 0664);:1
 drivers/media/enhancement/amdolby_vision/amdv.c:const u32 fmt_graphic_max = graphic_max;:2
 drivers/media/enhancement/amdolby_vision/amdv.c:if (!amdv_graphics_from_sink || amdv_graphic_max) {:2
+# 0016: OSD PQ passthrough - SDR_HDR on an OSD module becomes bypass with the
+# BT.2020 matrix, and a parameter change forces a csc re-process
+drivers/media/enhancement/amvecm/set_hdr2_v0.c:module_param(osd_pq_passthrough, uint, 0664);:1
+drivers/media/enhancement/amvecm/set_hdr2_v0.c:osd_pq_pass = true;:1
+drivers/media/enhancement/amvecm/set_hdr2_v0.c:rgb2ycbcr_ncl2020 : rgb2ycbcr_709;:1
+drivers/media/enhancement/amvecm/set_hdr2_v0.c:if ((hdr_process_select & HDR_BYPASS) && !osd_pq_pass):1
+drivers/media/enhancement/amvecm/amcsc.c:if (osd_pq_passthrough != cur_osd_pq_passthrough) {:1
+drivers/media/enhancement/amvecm/amcsc.c:cur_osd_pq_passthrough = osd_pq_passthrough;:1

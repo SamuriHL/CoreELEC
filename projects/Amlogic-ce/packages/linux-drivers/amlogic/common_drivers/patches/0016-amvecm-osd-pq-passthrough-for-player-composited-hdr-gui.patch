@@ -1,0 +1,122 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amvecm: osd pq passthrough for a player-composited HDR GUI
+
+On native HDR10/HDR10+ passthrough (DV core idle) the VPP programs OSD1/2/3
+with SDR_HDR: an sRGB EOTF, BT.709->BT.2020 gamut map and ST2084 encode of the
+OSD planes. A player that composites its own GUI to BT.2020 PQ (Kodi's HDR FBO
+composite, already used whenever the DV core is engaged) cannot use that
+route: PQ-authored graphics such as Blu-ray PGS subtitles are re-encoded, and
+anything outside BT.709 or above SDR white is unreachable from an sRGB input.
+
+Add osd_pq_passthrough (default 0 = unchanged). When set, an OSD SDR_HDR
+request is turned into HDR_BYPASS for the transfer/gamut stages, and the
+RGB->YUV matrix is BT.2020 instead of the bypass case's BT.709 (the S6/S7D
+post-HDR OSD matrix, and the HDR in-matrix on older SoCs). A change of the
+parameter re-runs the csc process on the next frame, like hdr_policy.
+
+--- a/drivers/media/enhancement/amvecm/set_hdr2_v0.c
++++ b/drivers/media/enhancement/amvecm/set_hdr2_v0.c
+@@ -49,6 +49,15 @@
+ module_param(disable_flush_flag, uint, 0664);
+ MODULE_PARM_DESC(disable_flush_flag, "\n disable_flush_flag\n");
+ 
++/* 1: the player already writes BT.2020 PQ RGB into the OSD planes (it
++ * composites its own GUI). Where the VPP would encode OSD1/2/3 SDR->HDR,
++ * leave the transfer and gamut untouched and apply only the BT.2020
++ * RGB->YUV matrix, so graphics authored in PQ reach the sink unchanged.
++ */
++u32 osd_pq_passthrough;
++module_param(osd_pq_passthrough, uint, 0664);
++MODULE_PARM_DESC(osd_pq_passthrough, "\n osd planes carry bt2020 pq, skip sdr->hdr\n");
++
+ // sdr to hdr table  12bit
+ int cgain_lut0[HDR2_CGAIN_LUT_SIZE] = {
+ 	0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400,
+@@ -3087,6 +3096,7 @@
+ 	int *oft_pre_out = bypass_pre;
+ 	int *oft_post_out = bypass_pos;
+ 	bool always_full_func = false;
++	bool osd_pq_pass = false;
+ 	int vpp_sel;
+ 	int cur_source;
+ 	int cur_csc;
+@@ -3101,6 +3111,18 @@
+ 	if (disable_flush_flag)
+ 		return hdr_process_select;
+ 
++	if (osd_pq_passthrough &&
++	    (module_sel == OSD1_HDR ||
++	     module_sel == OSD2_HDR ||
++	     module_sel == OSD3_HDR) &&
++	    (hdr_process_select & SDR_HDR)) {
++		hdr_process_select &= ~SDR_HDR;
++		hdr_process_select |= HDR_BYPASS;
++		osd_pq_pass = true;
++		pr_csc(12, "%s: osd(%d) pq passthrough, sdr_hdr -> bypass\n",
++		       __func__, module_sel);
++	}
++
+ 	/* t3 have osd1/2/3 and vd1/2, no vd3 */
+ 	/* t7 have osd1/3 and vd1/2/3, no osd2 */
+ 	/* t5w do not have osd hdr, but osd1/2/3 hdr matrix is used*/
+@@ -3743,7 +3765,8 @@
+ 					oft_post_in = rgb2yuvpos;
+ 				}
+ 			} else {
+-				coeff_in = rgb2ycbcr_709;
++				coeff_in = osd_pq_pass ?
++					rgb2ycbcr_ncl2020 : rgb2ycbcr_709;
+ 				oft_pre_in = rgb2yuvpre;
+ 				oft_post_in = rgb2yuvpos;
+ 				oft_pre_out = bypass_pre;
+@@ -4510,7 +4533,7 @@
+ 		else
+ 			mtx_on = MTX_ON;
+ 
+-		if (hdr_process_select & HDR_BYPASS)
++		if ((hdr_process_select & HDR_BYPASS) && !osd_pq_pass)
+ 			mtx_csc = MATRIX_RGB_YUV709;
+ 		else
+ 			mtx_csc = MATRIX_RGB_BT2020YUV;
+--- a/drivers/media/enhancement/amvecm/set_hdr2_v0.h
++++ b/drivers/media/enhancement/amvecm/set_hdr2_v0.h
+@@ -151,6 +151,7 @@
+ extern u32 hdr_hist[NUM_HDR_HIST][128];
+ extern u32 percentile[9];
+ extern u32 disable_flush_flag;
++extern u32 osd_pq_passthrough;
+ extern u32 cuva_static_hlg_en;
+ int cuva_hdr_update(enum hdr_module_sel module_sel,
+ 	enum hdr_process_sel hdr_process_select, enum vpp_index_e vpp_index);
+--- a/drivers/media/enhancement/amvecm/amcsc.c
++++ b/drivers/media/enhancement/amvecm/amcsc.c
+@@ -541,6 +541,7 @@
+ static uint primary_policy;
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ static uint cur_primary_policy;
++static uint cur_osd_pq_passthrough;
+ #endif
+ module_param(primary_policy, uint, 0664);
+ MODULE_PARM_DESC(primary_policy, "\n current primary_policy\n");
+@@ -8873,6 +8874,13 @@
+ 			signal_change_flag |= SIG_HDR_MODE;
+ 		}
+ 
++		if (osd_pq_passthrough != cur_osd_pq_passthrough) {
++			pr_csc(4, "osd pq passthrough changed from %d to %d.\n",
++			       cur_osd_pq_passthrough,
++			       osd_pq_passthrough);
++			signal_change_flag |= SIG_HDR_MODE;
++		}
++
+ 		if (get_primary_policy() != cur_primary_policy) {
+ 			pr_csc(4, "primary policy changed from %d to %d.\n",
+ 			       cur_primary_policy,
+@@ -9046,6 +9054,7 @@
+ #endif
+ 		cur_hdr_policy = get_hdr_policy();
+ 		cur_primary_policy = get_primary_policy();
++		cur_osd_pq_passthrough = osd_pq_passthrough;
+ 	}
+ 
+ 	if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A) &&
