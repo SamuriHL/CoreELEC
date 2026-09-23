@@ -1,0 +1,742 @@
+BD-J: implement the HAVi background plane; add bd_bdj_waiting_for_playback()
+
+1. HAVi background plane (behind video).
+   HBackgroundDevice.setBackgroundConfiguration() and
+   HStillImageBackgroundConfiguration.displayImage() only stored state and
+   logged UNIMPLEMENTED, so a disc that paints its menu background through
+   them (Lionsgate's com.lge.radius engine, e.g. John Wick 3) showed nothing.
+   The plane is now rendered (configuration colour, then the still image
+   scaled into its HScreenRectangle) and delivered through the existing ARGB
+   overlay callback on BD_OVERLAY_BG, the slot reserved in 1.5.0 (no public
+   ABI change). The background never queues BD_EVENT_MENU and never uses an
+   application-allocated BD_ARGB_BUFFER. displayImage() decodes into its own
+   copy (HBackgroundImage.flush() frees the image's buffers): up to 2 s
+   inline, or on a worker when called on an image fetcher thread (discs call
+   it from imageLoaded()); a missing image throws IOException. The plane is
+   reset on BD-J unload and when the xlet that set it has been terminated.
+   updateBackgroundN is registered last so an older jar still registers.
+
+2. bd_bdj_waiting_for_playback(): true while a BD-J title has no playlist
+   open, or has prefetched one it has not started. bd_read() delivers nothing
+   then (it only idles), so a player blocked in bd_read() can neither present
+   the BD-J graphics nor deliver key input - a BD-J screen that plays no
+   playlist (e.g. a disc's own resume prompt) is left invisible and dead.
+
+diff --git a/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
+new file mode 100644
+index 0000000..a211146
+--- /dev/null
++++ b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
+@@ -0,0 +1,218 @@
++/*
++ * This file is part of libbluray
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library. If not, see
++ * <http://www.gnu.org/licenses/>.
++ */
++
++package org.havi.ui;
++
++import java.awt.Color;
++
++import org.videolan.BDJXletContext;
++import org.videolan.GUIManager;
++import org.videolan.Libbluray;
++import org.videolan.Logger;
++
++/*
++ * The HAVi background plane (behind video), delivered to the player as the
++ * BD_OVERLAY_BG ARGB overlay plane.
++ *
++ * The plane is re-rendered from the current HBackgroundConfiguration whenever
++ * the configuration, its colour, or its still image changes: fill with the
++ * configuration colour, then draw the configuration's still image (if any)
++ * scaled into its HScreenRectangle. A fully transparent colour with no image
++ * closes the plane.
++ *
++ * Callers are xlet lifecycle threads, the event dispatch thread, xlet-owned
++ * threads and image fetcher threads, so all state lives under one lock. The
++ * native push takes the OSD buffer mutex and never calls back into Java, so
++ * holding this lock across it keeps the lock order one-way.
++ */
++final class BackgroundPlane {
++
++    private static final Object lock = new Object();
++    private static final Logger logger = Logger.getLogger(BackgroundPlane.class.getName());
++
++    private static HBackgroundConfiguration current = null;
++    private static BDJXletContext owner = null;
++    private static int[] pixels = null;
++    private static int width = 0;
++    private static int height = 0;
++    private static boolean open = false;
++
++    private BackgroundPlane() {
++    }
++
++    /* HBackgroundDevice.setBackgroundConfiguration() */
++    static void configurationChanged(HBackgroundConfiguration hbc) {
++        synchronized (lock) {
++            current = hbc;
++            touch();
++            render();
++        }
++    }
++
++    /* HBackgroundConfiguration.setColor() / HStillImageBackgroundConfiguration image change */
++    static void contentChanged(HBackgroundConfiguration hbc) {
++        synchronized (lock) {
++            if (hbc != current)
++                return; /* shown when it becomes current */
++            touch();
++            render();
++        }
++    }
++
++    /* A new title started: drop the background if the xlet that set it is gone. */
++    static void releaseIfOwnerGone() {
++        synchronized (lock) {
++            if (owner != null && owner.isReleased()) {
++                logger.info("background owner released, resetting background plane");
++                resetLocked();
++            }
++        }
++    }
++
++    /* BD-J title unload / disc shutdown: back to the transparent default. */
++    static void reset() {
++        synchronized (lock) {
++            resetLocked();
++        }
++    }
++
++    private static void resetLocked() {
++        HScreen screen = HScreen.getDefaultHScreen();
++        if (screen != null) {
++            HBackgroundDevice device = screen.getDefaultHBackgroundDevice();
++            if (device != null)
++                device.resetBackground();
++        }
++        current = null;
++        owner = null;
++        close();
++    }
++
++    private static void touch() {
++        BDJXletContext ctx = BDJXletContext.getCurrentContext();
++        if (ctx != null)
++            owner = ctx;
++    }
++
++    private static void close() {
++        if (open) {
++            Libbluray.updateBackground(0, 0, null);
++            open = false;
++        }
++        pixels = null;
++    }
++
++    private static void render() {
++        HBackgroundConfiguration hbc = current;
++        if (hbc == null) {
++            close();
++            return;
++        }
++
++        Color color = hbc.getColor();
++        int argb = (color != null) ? color.getRGB() : 0;
++
++        int[] img = null;
++        int imgW = 0, imgH = 0;
++        HScreenRectangle rect = null;
++        if (hbc instanceof HStillImageBackgroundConfiguration) {
++            HStillImageBackgroundConfiguration still = (HStillImageBackgroundConfiguration)hbc;
++            synchronized (still) {
++                img = still.getDecodedPixels();
++                imgW = still.getDecodedWidth();
++                imgH = still.getDecodedHeight();
++                rect = still.getRectangle();
++            }
++        }
++
++        if ((argb >>> 24) == 0 && img == null) {
++            close();
++            return;
++        }
++
++        int w = 0, h = 0;
++        try {
++            GUIManager gui = GUIManager.getInstance();
++            w = gui.getWidth();
++            h = gui.getHeight();
++        } catch (Error e) {
++        }
++        if (w <= 0 || h <= 0) {
++            w = 1920;
++            h = 1080;
++        }
++
++        if (pixels == null || width != w || height != h) {
++            if (open) {
++                Libbluray.updateBackground(0, 0, null);
++                open = false;
++            }
++            pixels = new int[w * h];
++            width = w;
++            height = h;
++        }
++
++        java.util.Arrays.fill(pixels, argb);
++
++        if (img != null && imgW > 0 && imgH > 0 && rect != null)
++            blit(img, imgW, imgH, rect);
++
++        if (!open) {
++            Libbluray.updateBackground(width, height, null);
++            open = true;
++        }
++        Libbluray.updateBackground(width, height, pixels);
++    }
++
++    /* nearest-neighbour scale of the decoded image into the normalized rectangle */
++    private static void blit(int[] img, int imgW, int imgH, HScreenRectangle rect) {
++        int dx0 = Math.round(rect.x * width);
++        int dy0 = Math.round(rect.y * height);
++        int dw  = Math.round(rect.width * width);
++        int dh  = Math.round(rect.height * height);
++        if (dw <= 0 || dh <= 0)
++            return;
++
++        int x0 = Math.max(0, dx0), x1 = Math.min(width,  dx0 + dw);
++        int y0 = Math.max(0, dy0), y1 = Math.min(height, dy0 + dh);
++
++        for (int y = y0; y < y1; y++) {
++            int sy = (int)(((long)(y - dy0) * imgH) / dh);
++            int srow = sy * imgW;
++            int drow = y * width;
++            for (int x = x0; x < x1; x++) {
++                int sx = (int)(((long)(x - dx0) * imgW) / dw);
++                int p = img[srow + sx];
++                int a = p >>> 24;
++                if (a == 0xff) {
++                    pixels[drow + x] = p;
++                } else if (a != 0) {
++                    /* image over the colour fill */
++                    int d = pixels[drow + x];
++                    int ia = 255 - a;
++                    int da = d >>> 24;
++                    int oa = a + (da * ia) / 255;
++                    int r = (((p >> 16) & 0xff) * a + ((d >> 16) & 0xff) * ia) / 255;
++                    int g = (((p >>  8) & 0xff) * a + ((d >>  8) & 0xff) * ia) / 255;
++                    int b = (( p        & 0xff) * a + ( d        & 0xff) * ia) / 255;
++                    pixels[drow + x] = (oa << 24) | (r << 16) | (g << 8) | b;
++                }
++            }
++        }
++    }
++}
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java b/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
+index c16ce2d..eeeb477 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
+@@ -45,11 +45,14 @@ public class HBackgroundConfiguration extends HScreenConfiguration {
+ 
+     public void setColor(Color color)
+             throws HPermissionDeniedException, HConfigurationException {
+-        if (color.getAlpha() < 255) {
+-            org.videolan.Logger.unimplemented("HBackgroundConfiguration", "setColor(alpha<255)");
+-            //throw new HConfigurationException();
+-        }
++        if (color == null)
++            throw new HConfigurationException();
+         this.color = color;
++        BackgroundPlane.contentChanged(this);
++    }
++
++    void resetBackground() {
++        color = new Color(0, 0, 0, 0);
+     }
+ 
+     private HBackgroundConfigTemplate hbct;
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+index 08c5c56..4a31032 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+@@ -80,11 +80,29 @@ public class HBackgroundDevice extends HScreenDevice {
+     public boolean setBackgroundConfiguration(HBackgroundConfiguration hbc)
+             throws SecurityException, HPermissionDeniedException,
+             HConfigurationException {
+-        org.videolan.Logger.unimplemented("HBackgroundDevide", "setBackgroundConfiguration()");
++        if (this.hbc == hbc)
++            return true;
+         this.hbc = hbc;
++        BackgroundPlane.configurationChanged(hbc);
+         return true;
+     }
+ 
++    /* org.videolan.BDJLoader hooks (BackgroundPlane is package-private) */
++    public static void releaseBackgroundIfOwnerGone() {
++        BackgroundPlane.releaseIfOwnerGone();
++    }
++
++    public static void resetBackgroundPlane() {
++        BackgroundPlane.reset();
++    }
++
++    /* back to the default configuration with a transparent colour and no image */
++    void resetBackground() {
++        for (int i = 0; i < hbcArray.length; i++)
++            hbcArray[i].resetBackground();
++        hbc = hbcArray[0];
++    }
++
+     private HBackgroundConfiguration[] hbcArray;
+     private HBackgroundConfiguration hbc;
+ }
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java b/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+index adfa7cf..6186460 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+@@ -39,9 +39,101 @@ public class HStillImageBackgroundConfiguration extends
+     public void displayImage(HBackgroundImage image, HScreenRectangle r)
+             throws IOException, HPermissionDeniedException,
+             HConfigurationException {
+-        org.videolan.Logger.unimplemented("HStillImageBackgroundConfiguration", "displayImage()");
+-        this.image = image;
+-        this.rect = r;
++        if (image == null || image.getImage() == null)
++            throw new IOException("no background image");
++        if (r == null)
++            r = new HScreenRectangle(0.0f, 0.0f, 1.0f, 1.0f);
++
++        synchronized (this) {
++            this.image = image;
++            this.rect = r;
++        }
++
++        /* Decode into our own pixel copy: HBackgroundImage.flush() releases the
++         * image's buffers, and a later setColor() must still redraw it.
++         * Image fetcher threads must not block on a decode that needs a fetcher
++         * thread (discs call displayImage() from imageLoaded()), so there the
++         * decode moves to a worker. */
++        boolean onFetcher = Thread.currentThread().getName().startsWith("Image Fetcher");
++        if (!onFetcher) {
++            int result = decode(image, r, DECODE_WAIT_MS);
++            if (result == DECODE_FAILED)
++                throw new IOException("background image decode failed");
++            if (result == DECODE_DONE)
++                return;
++        }
++        decodeAsync(image, r);
++    }
++
++    private static final int DECODE_DONE    = 0;
++    private static final int DECODE_FAILED  = 1;
++    private static final int DECODE_TIMEOUT = 2;
++    private static final long DECODE_WAIT_MS       = 2000;
++    private static final long DECODE_ASYNC_WAIT_MS = 10000;
++
++    private int decode(HBackgroundImage image, HScreenRectangle r, long waitMs) {
++        java.awt.image.PixelGrabber pg =
++            new java.awt.image.PixelGrabber(image.getImage(), 0, 0, -1, -1, true);
++        boolean done;
++        try {
++            done = pg.grabPixels(waitMs);
++        } catch (InterruptedException e) {
++            return DECODE_TIMEOUT;
++        }
++        if ((pg.getStatus() & (java.awt.image.ImageObserver.ERROR | java.awt.image.ImageObserver.ABORT)) != 0)
++            return DECODE_FAILED;
++        if (!done)
++            return DECODE_TIMEOUT;
++
++        Object px = pg.getPixels();
++        if (!(px instanceof int[]) || pg.getWidth() <= 0 || pg.getHeight() <= 0)
++            return DECODE_FAILED;
++
++        synchronized (this) {
++            /* a newer displayImage() replaced this one while decoding */
++            if (this.image != image || this.rect != r)
++                return DECODE_DONE;
++            decodedPixels = (int[])px;
++            decodedWidth  = pg.getWidth();
++            decodedHeight = pg.getHeight();
++        }
++        BackgroundPlane.contentChanged(this);
++        return DECODE_DONE;
++    }
++
++    private void decodeAsync(final HBackgroundImage image, final HScreenRectangle r) {
++        Thread t = new Thread("HBackgroundImage decode") {
++            public void run() {
++                if (decode(image, r, DECODE_ASYNC_WAIT_MS) != DECODE_DONE)
++                    org.videolan.Logger.getLogger("HStillImageBackgroundConfiguration")
++                        .error("background image decode failed or timed out");
++            }
++        };
++        t.setDaemon(true);
++        t.start();
++    }
++
++    void resetBackground() {
++        super.resetBackground();
++        synchronized (this) {
++            image = null;
++            rect = new HScreenRectangle(0.0f, 0.0f, 1.0f, 1.0f);
++            decodedPixels = null;
++            decodedWidth = 0;
++            decodedHeight = 0;
++        }
++    }
++
++    int[] getDecodedPixels() {
++        return decodedPixels;
++    }
++
++    int getDecodedWidth() {
++        return decodedWidth;
++    }
++
++    int getDecodedHeight() {
++        return decodedHeight;
+     }
+ 
+     protected HBackgroundImage getImage() {
+@@ -53,5 +145,8 @@ public class HStillImageBackgroundConfiguration extends
+     }
+ 
+     private HBackgroundImage image = null;
++    private int[] decodedPixels = null;
++    private int decodedWidth = 0;
++    private int decodedHeight = 0;
+     private HScreenRectangle rect = new HScreenRectangle(0.0f, 0.0f, 1.0f, 1.0f);
+ }
+diff --git a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
+index 2a12607..f779f1d 100644
+--- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
+@@ -286,6 +286,9 @@ public class BDJLoader {
+                 logger.error("loadN(): autoplaylist failed: " + e + "\n" + Logger.dumpStack(e));
+             }
+ 
++            // a background set by an xlet this title terminated goes with it
++            org.havi.ui.HBackgroundDevice.releaseBackgroundIfOwnerGone();
++
+             // now run all the xlets
+             for (int i = 0; i < appTable.length; i++) {
+                 int code = appTable[i].getControlCode();
+@@ -343,6 +346,8 @@ public class BDJLoader {
+ 
+             PlayerManager.getInstance().releaseAllPlayers(true);
+ 
++            org.havi.ui.HBackgroundDevice.resetBackgroundPlane();
++
+             return true;
+         } catch (Throwable e) {
+             logger.error("unloadN() failed: " + e + "\n" + Logger.dumpStack(e));
+diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+index 7bca7d7..e29e483 100644
+--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+@@ -696,6 +696,20 @@ public class Libbluray {
+                        x0, y0, x1, y1);
+     }
+ 
++    /* HAVi background plane (org.havi.ui.BackgroundPlane): whole-plane
++     * updates. rgbArray == null opens the plane (width/height > 0) or closes
++     * it (0x0). */
++    public static void updateBackground(int width, int height, int[] rgbArray) {
++        if (nativePointer == 0)
++            return;
++        try {
++            updateBackgroundN(nativePointer, width, height, rgbArray);
++        } catch (LinkageError e) {
++            /* native library without the background plane */
++            System.err.println("updateBackgroundN() unavailable: " + e);
++        }
++    }
++
+     /*
+      * Events from native side
+      */
+@@ -893,6 +907,7 @@ public class Libbluray {
+     private static native Bdjo getBdjoN(long np, String name);
+     private static native void updateGraphicN(long np, int width, int height, int[] rgbArray,
+                                               int x0, int y0, int x1, int y1);
++    private static native void updateBackgroundN(long np, int width, int height, int[] rgbArray);
+ 
+     private static long nativePointer = 0;
+     private static TitleInfo[] titleInfos = null;
+diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
+index 56a063c..c3bbc01 100644
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.c
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c
+@@ -629,6 +629,45 @@ JNIEXPORT void JNICALL Java_org_videolan_Libbluray_updateGraphicN(JNIEnv * env,
+     bdpriv_unlock_osd_buffer(bd);
+ }
+ 
++/* HAVi background plane (org.havi.ui.BackgroundPlane). Whole-plane updates
++ * only; the pixels always come from the Java array, never an
++ * application-allocated BD_ARGB_BUFFER. rgbArray == NULL with a size opens
++ * the plane, with no size closes it. */
++JNIEXPORT void JNICALL Java_org_videolan_Libbluray_updateBackgroundN(JNIEnv * env,
++        jclass cls, jlong np, jint width, jint height, jintArray rgbArray) {
++
++    BLURAY* bd = (BLURAY*)(intptr_t)np;
++
++    BD_DEBUG(DBG_JNI, "updateBackgroundN(%ldx%ld, %s)\n", (long)width, (long)height,
++             rgbArray ? "draw" : "init/close");
++
++    if (!bd) {
++        return;
++    }
++
++    /* same lock as updateGraphicN: the overlay proc is replaced under it */
++    bdpriv_lock_osd_buffer(bd);
++
++    if (!rgbArray) {
++        bdpriv_bdj_bg_cb(bd, NULL, (int)width, (int)height, 0, 0, 0, 0);
++    } else if (width > 0 && height > 0 &&
++               (*env)->GetArrayLength(env, rgbArray) >= (jsize)(width * height)) {
++        jint *image = (jint *)(*env)->GetPrimitiveArrayCritical(env, rgbArray, NULL);
++        if (image) {
++            bdpriv_bdj_bg_cb(bd, (const unsigned *)image, (int)width, (int)height,
++                             0, 0, (int)width - 1, (int)height - 1);
++            (*env)->ReleasePrimitiveArrayCritical(env, rgbArray, image, JNI_ABORT);
++        } else {
++            BD_DEBUG(DBG_BDJ | DBG_CRIT, "updateBackgroundN: GetPrimitiveArrayCritical() failed\n");
++        }
++    } else {
++        BD_DEBUG(DBG_BDJ | DBG_CRIT, "updateBackgroundN: array smaller than %ldx%ld\n",
++                 (long)width, (long)height);
++    }
++
++    bdpriv_unlock_osd_buffer(bd);
++}
++
+ #define CC (char*)(uintptr_t)  /* cast a literal from (const char*) */
+ #define VC (void*)(uintptr_t)  /* cast function pointer to void* */
+ 
+@@ -735,6 +774,12 @@ Java_org_videolan_Libbluray_methods[] =
+         CC("(JII[IIIII)V"),
+         VC(Java_org_videolan_Libbluray_updateGraphicN),
+     },
++    /* keep last: an older jar without it still registers everything above */
++    {
++        CC("updateBackgroundN"),
++        CC("(JII[I)V"),
++        VC(Java_org_videolan_Libbluray_updateBackgroundN),
++    },
+ };
+ 
+ BD_PRIVATE CPP_EXTERN const int
+diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.h b/src/libbluray/bdj/native/org_videolan_Libbluray.h
+index d75d5ca..aff3ee3 100644
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.h
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.h
+@@ -253,6 +253,14 @@ JNIEXPORT jobject JNICALL Java_org_videolan_Libbluray_getBdjoN
+ JNIEXPORT void JNICALL Java_org_videolan_Libbluray_updateGraphicN
+ (JNIEnv *, jclass, jlong, jint, jint, jintArray, jint, jint, jint, jint);
+ 
++/*
++ * Class:     org_videolan_Libbluray
++ * Method:    updateBackgroundN
++ * Signature: (JII[I)V
++ */
++JNIEXPORT void JNICALL Java_org_videolan_Libbluray_updateBackgroundN
++(JNIEnv *, jclass, jlong, jint, jint, jintArray);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index d24651e..518bd19 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -1443,20 +1443,30 @@ void bdpriv_unlock_osd_buffer(BLURAY *bd)
+ 
+ /*
+  * handle graphics updates from BD-J layer
++ *
++ * plane is BD_OVERLAY_IG (the BD-J graphics plane) or BD_OVERLAY_BG (the HAVi
++ * background plane, behind video). Only the graphics plane is a menu: the
++ * background never queues BD_EVENT_MENU, and it is never copied to an
++ * application-allocated BD_ARGB_BUFFER (its pixels always come from the Java
++ * array), so the buffer's dirty rectangles are left alone for it.
+  */
+-void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
+-                   int x0, int y0, int x1, int y1)
++static void _bdj_osd_cb(BLURAY *bd, int plane, const unsigned *img, int w, int h,
++                        int x0, int y0, int x1, int y1)
+ {
+     BD_ARGB_OVERLAY aov;
++    const int is_ig = (plane == BD_OVERLAY_IG);
++    BD_ARGB_BUFFER *argb_buffer = is_ig ? bd->argb_buffer : NULL;
+ 
+     if (!bd->argb_overlay_proc) {
+-        _queue_event(bd, BD_EVENT_MENU, 0);
++        if (is_ig) {
++            _queue_event(bd, BD_EVENT_MENU, 0);
++        }
+         return;
+     }
+ 
+     memset(&aov, 0, sizeof(aov));
+     aov.pts   = -1;
+-    aov.plane = BD_OVERLAY_IG;
++    aov.plane = (uint8_t)plane;
+ 
+     /* no image data -> init or close */
+     if (!img) {
+@@ -1464,10 +1474,14 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
+             aov.cmd = BD_ARGB_OVERLAY_INIT;
+             aov.w   = w;
+             aov.h   = h;
+-            _queue_event(bd, BD_EVENT_MENU, 1);
++            if (is_ig) {
++                _queue_event(bd, BD_EVENT_MENU, 1);
++            }
+         } else {
+             aov.cmd = BD_ARGB_OVERLAY_CLOSE;
+-            _queue_event(bd, BD_EVENT_MENU, 0);
++            if (is_ig) {
++                _queue_event(bd, BD_EVENT_MENU, 0);
++            }
+         }
+ 
+         bd->argb_overlay_proc(bd->argb_overlay_proc_handle, &aov);
+@@ -1480,7 +1494,7 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
+     }
+ 
+     /* pass only changed region */
+-    if (bd->argb_buffer && (bd->argb_buffer->width < w || bd->argb_buffer->height < h)) {
++    if (argb_buffer && (argb_buffer->width < w || argb_buffer->height < h)) {
+         aov.argb   = img;
+     } else {
+         aov.argb   = img + x0 + y0 * w;
+@@ -1491,12 +1505,12 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
+     aov.w      = x1 - x0 + 1;
+     aov.h      = y1 - y0 + 1;
+ 
+-    if (bd->argb_buffer) {
++    if (argb_buffer) {
+         /* set dirty region */
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].x0 = x0;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].x1 = x1;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].y0 = y0;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
++        argb_buffer->dirty[BD_OVERLAY_IG].x0 = x0;
++        argb_buffer->dirty[BD_OVERLAY_IG].x1 = x1;
++        argb_buffer->dirty[BD_OVERLAY_IG].y0 = y0;
++        argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
+     }
+ 
+     /* draw */
+@@ -1507,15 +1521,27 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
+     aov.cmd = BD_ARGB_OVERLAY_FLUSH;
+     bd->argb_overlay_proc(bd->argb_overlay_proc_handle, &aov);
+ 
+-    if (bd->argb_buffer) {
++    if (argb_buffer) {
+         /* reset dirty region */
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].x0 = bd->argb_buffer->width;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].x1 = bd->argb_buffer->height;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].y0 = 0;
+-        bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = 0;
++        argb_buffer->dirty[BD_OVERLAY_IG].x0 = argb_buffer->width;
++        argb_buffer->dirty[BD_OVERLAY_IG].x1 = argb_buffer->height;
++        argb_buffer->dirty[BD_OVERLAY_IG].y0 = 0;
++        argb_buffer->dirty[BD_OVERLAY_IG].y1 = 0;
+     }
+ }
+ 
++void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
++                   int x0, int y0, int x1, int y1)
++{
++    _bdj_osd_cb(bd, BD_OVERLAY_IG, img, w, h, x0, y0, x1, y1);
++}
++
++void bdpriv_bdj_bg_cb(BLURAY *bd, const unsigned *img, int w, int h,
++                  int x0, int y0, int x1, int y1)
++{
++    _bdj_osd_cb(bd, BD_OVERLAY_BG, img, w, h, x0, y0, x1, y1);
++}
++
+ /*
+  * BD-J
+  */
+@@ -2858,6 +2884,24 @@ uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_length)
+     return count;
+ }
+ 
++int bd_bdj_waiting_for_playback(BLURAY *bd)
++{
++    int waiting;
++
++    if (!bd) {
++        return 0;
++    }
++
++    bd_mutex_lock(&bd->mutex);
++    /* a BD-J title with no playlist open, or one it has prefetched but not
++     * started (playback begins in bdpriv_select_rate()): bd_read() has
++     * nothing to deliver until the Xlet acts */
++    waiting = (bd->title_type == title_bdj) && (!bd->title || bd->bdj_wait_start);
++    bd_mutex_unlock(&bd->mutex);
++
++    return waiting;
++}
++
+ int bd_get_main_title(BLURAY *bd)
+ {
+     int main_title_idx = -1;
+diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+index c6a64e1..8864c24 100644
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -488,6 +488,22 @@ BD_PUBLIC uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_l
+  */
+ BD_PUBLIC int bd_get_main_title(BLURAY *bd);
+ 
++/**
++ *
++ *  Query whether a BD-J title is showing a screen with no playlist.
++ *
++ *  True while the current title is BD-J and no playlist is open, or a playlist
++ *  was selected (prefetched) but playback has not been started by the Xlet.
++ *  bd_read() delivers no stream data in that state; the player should keep
++ *  presenting the BD-J graphics and delivering user input instead of waiting
++ *  on bd_read().
++ *
++ * @param bd  BLURAY object
++ * @return 1 if waiting, 0 otherwise
++ */
++BD_PUBLIC int bd_bdj_waiting_for_playback(BLURAY *bd);
++
++
+ /**
+  *
+  *  Get information about a title
+diff --git a/src/libbluray/bluray_internal.h b/src/libbluray/bluray_internal.h
+index a1105c4..2ed2f06 100644
+--- a/src/libbluray/bluray_internal.h
++++ b/src/libbluray/bluray_internal.h
+@@ -85,5 +85,7 @@ BD_PRIVATE void                     bdpriv_unlock_osd_buffer(struct bluray *bd);
+ 
+ BD_PRIVATE void  bdpriv_bdj_osd_cb(struct bluray *bd, const unsigned *img, int w, int h,
+                                    int x0, int y0, int x1, int y1);
++BD_PRIVATE void  bdpriv_bdj_bg_cb(struct bluray *bd, const unsigned *img, int w, int h,
++                                   int x0, int y0, int x1, int y1);
+ 
+ #endif  /* _BLURAY_INTERNAL_H_ */
