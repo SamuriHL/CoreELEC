@@ -16,18 +16,19 @@ BD-J: implement the HAVi background plane; add bd_bdj_waiting_for_playback()
    reset on BD-J unload and when the xlet that set it has been terminated.
    updateBackgroundN is registered last so an older jar still registers.
 
-2. bd_bdj_waiting_for_playback(): true while a BD-J title has no playlist
-   open, or has prefetched one it has not started. bd_read() delivers nothing
+2. bd_bdj_waiting_for_playback(): 1 while a BD-J title has no playlist
+   open, 2 while it has prefetched one it has not started, else 0
+   (BD_HAVE_BDJ_WAITING_FOR_PLAYBACK). bd_read() delivers nothing
    then (it only idles), so a player blocked in bd_read() can neither present
    the BD-J graphics nor deliver key input - a BD-J screen that plays no
    playlist (e.g. a disc's own resume prompt) is left invisible and dead.
 
 diff --git a/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
 new file mode 100644
-index 0000000..a211146
+index 0000000..c3d9bae
 --- /dev/null
 +++ b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,232 @@
 +/*
 + * This file is part of libbluray
 + *
@@ -97,8 +98,14 @@ index 0000000..a211146
 +    /* HBackgroundConfiguration.setColor() / HStillImageBackgroundConfiguration image change */
 +    static void contentChanged(HBackgroundConfiguration hbc) {
 +        synchronized (lock) {
-+            if (hbc != current)
-+                return; /* shown when it becomes current */
++            if (hbc != current) {
++                /* nothing tracked yet (startup, or after a reset): the device
++                 * starts on its default configuration, and re-selecting it is a
++                 * no-op there, so adopt it if it is the device's current one */
++                if (current != null || hbc != deviceConfiguration())
++                    return; /* shown when it becomes current */
++                current = hbc;
++            }
 +            touch();
 +            render();
 +        }
@@ -131,6 +138,14 @@ index 0000000..a211146
 +        current = null;
 +        owner = null;
 +        close();
++    }
++
++    private static HBackgroundConfiguration deviceConfiguration() {
++        HScreen screen = HScreen.getDefaultHScreen();
++        if (screen == null)
++            return null;
++        HBackgroundDevice device = screen.getDefaultHBackgroundDevice();
++        return (device != null) ? device.getCurrentConfiguration() : null;
 +    }
 +
 +    private static void touch() {
@@ -561,7 +576,7 @@ index d75d5ca..aff3ee3 100644
  }
  #endif
 diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
-index d24651e..518bd19 100644
+index d24651e..b5d7ed1 100644
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
 @@ -1443,20 +1443,30 @@ void bdpriv_unlock_osd_buffer(BLURAY *bd)
@@ -676,7 +691,7 @@ index d24651e..518bd19 100644
  /*
   * BD-J
   */
-@@ -2858,6 +2884,24 @@ uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_length)
+@@ -2858,6 +2884,30 @@ uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_length)
      return count;
  }
  
@@ -689,10 +704,16 @@ index d24651e..518bd19 100644
 +    }
 +
 +    bd_mutex_lock(&bd->mutex);
-+    /* a BD-J title with no playlist open, or one it has prefetched but not
-+     * started (playback begins in bdpriv_select_rate()): bd_read() has
++    /* a BD-J title with no playlist open (1), or one it has prefetched but
++     * not started (2; playback begins in bdpriv_select_rate()): bd_read() has
 +     * nothing to deliver until the Xlet acts */
-+    waiting = (bd->title_type == title_bdj) && (!bd->title || bd->bdj_wait_start);
++    if (bd->title_type != title_bdj) {
++        waiting = 0;
++    } else if (!bd->title) {
++        waiting = 1;
++    } else {
++        waiting = bd->bdj_wait_start ? 2 : 0;
++    }
 +    bd_mutex_unlock(&bd->mutex);
 +
 +    return waiting;
@@ -702,10 +723,10 @@ index d24651e..518bd19 100644
  {
      int main_title_idx = -1;
 diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
-index c6a64e1..8864c24 100644
+index c6a64e1..3486104 100644
 --- a/src/libbluray/bluray.h
 +++ b/src/libbluray/bluray.h
-@@ -488,6 +488,22 @@ BD_PUBLIC uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_l
+@@ -488,6 +488,24 @@ BD_PUBLIC uint32_t bd_get_titles(BLURAY *bd, uint8_t flags, uint32_t min_title_l
   */
  BD_PUBLIC int bd_get_main_title(BLURAY *bd);
  
@@ -720,9 +741,11 @@ index c6a64e1..8864c24 100644
 + *  on bd_read().
 + *
 + * @param bd  BLURAY object
-+ * @return 1 if waiting, 0 otherwise
++ * @return 0 if not waiting, 1 if no playlist is open, 2 if a playlist is
++ *         selected but not started
 + */
 +BD_PUBLIC int bd_bdj_waiting_for_playback(BLURAY *bd);
++#define BD_HAVE_BDJ_WAITING_FOR_PLAYBACK 1
 +
 +
  /**
