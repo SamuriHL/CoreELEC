@@ -1,0 +1,162 @@
+From 25f76cf83d76d1f95714a39330d1dce49b0cfb5f Mon Sep 17 00:00:00 2001
+From: SamuriHL <samurihl@msn.com>
+Date: Wed, 23 Sep 2026 19:40:15 -0400
+Subject: [PATCH] bdj: prefer the jar installed with libbluray over
+ LIBBLURAY_CP
+
+The JRE addon exports LIBBLURAY_CP pointing at its own copy of
+libbluray-j2se-<version>.jar. That copy has the same file name as the jar
+installed with libbluray but can come from an older or differently patched
+build, so Java classes and native methods get out of step (seen: the
+background plane classes missing while the native side registers
+updateBackgroundN). Search next to the loaded library and the system
+directories first; LIBBLURAY_CP and the current directory remain fallbacks.
+---
+ src/libbluray/bdj/bdj.c | 98 ++++++++++++++++++++++++-----------------
+ 1 file changed, 58 insertions(+), 40 deletions(-)
+
+diff --git a/src/libbluray/bdj/bdj.c b/src/libbluray/bdj/bdj.c
+index 6332567..a42ef0c 100644
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -535,57 +535,24 @@ void bdj_config_cleanup(BDJ_CONFIG *p)
+     X_FREE(p->classpath[1]);
+ }
+ 
+-static char *_find_libbluray_jar0()
++/* jar installed together with this libbluray: next to the loaded library, or
++ * in the pre-defined system directories */
++static char *_find_installed_jar(void)
+ {
++#ifndef _WIN32
+     // pre-defined search paths for libbluray.jar
+     static const char * const jar_paths[] = {
+-#ifndef _WIN32
+ #  if defined(__FreeBSD__) || defined(__OpenBSD__)
+         "/usr/local/share/java/" BDJ_JARFILE,
+ #  else
+         "/usr/share/java/" BDJ_JARFILE,
+         "/usr/share/libbluray/lib/" BDJ_JARFILE,
+ #  endif
+-#endif
+-        BDJ_JARFILE,
+     };
++#endif
+ 
+     unsigned i;
+ 
+-    // check if overriding the classpath
+-    const char *classpath = getenv("LIBBLURAY_CP");
+-    if (classpath) {
+-        size_t cp_len = strlen(classpath);
+-        char *jar;
+-
+-        // directory or file ?
+-        if (cp_len > 0 && (classpath[cp_len - 1] == '/' || classpath[cp_len - 1] == '\\')) {
+-            jar = str_printf("%s%s", classpath, BDJ_JARFILE);
+-        } else {
+-            jar = str_dup(classpath);
+-        }
+-
+-        if (!jar) {
+-            BD_DEBUG(DBG_CRIT, "out of memory\n");
+-            return NULL;
+-        }
+-
+-        if (_can_read_file(jar)) {
+-            return jar;
+-        }
+-
+-        X_FREE(jar);
+-        /* Do not hard-fail when the override location lacks a matching jar:
+-         * an outdated LIBBLURAY_CP (e.g. a JRE addon dir still carrying jars
+-         * for an older libbluray) would otherwise silently kill BD-J even
+-         * though the correct version-matched jar is installed in a default
+-         * search location such as /usr/share/java. */
+-        BD_DEBUG(DBG_BDJ | DBG_CRIT,
+-                 "invalid LIBBLURAY_CP %s, falling back to default search\n", classpath);
+-    }
+-
+-    BD_DEBUG(DBG_BDJ, "searching for "BDJ_JARFILE" ...\n");
+-
+     // check directory where libbluray.so was loaded from
+     const char *lib_path = dl_get_path();
+     if (lib_path) {
+@@ -600,21 +567,72 @@ static char *_find_libbluray_jar0()
+ 
+             BD_DEBUG(DBG_BDJ, "Checking %s ...\n", cp);
+             if (_can_read_file(cp)) {
+-                BD_DEBUG(DBG_BDJ, "using %s\n", cp);
+                 return cp;
+             }
+             X_FREE(cp);
+         }
+     }
+ 
++#ifndef _WIN32
+     // check pre-defined directories
+     for (i = 0; i < sizeof(jar_paths) / sizeof(jar_paths[0]); i++) {
+         BD_DEBUG(DBG_BDJ, "Checking %s ...\n", jar_paths[i]);
+         if (_can_read_file(jar_paths[i])) {
+-            BD_DEBUG(DBG_BDJ, "using %s\n", jar_paths[i]);
+             return str_dup(jar_paths[i]);
+         }
+     }
++#endif
++
++    return NULL;
++}
++
++static char *_find_libbluray_jar0()
++{
++    char *jar;
++
++    /* The jar installed with this libbluray is built from the same (patched)
++     * sources as the native side. A JRE addon points LIBBLURAY_CP at its own
++     * copy of the jar, which carries the same file name but may come from an
++     * older or differently patched build, so the installed jar wins. */
++    BD_DEBUG(DBG_BDJ, "searching for "BDJ_JARFILE" ...\n");
++    jar = _find_installed_jar();
++    if (jar) {
++        BD_DEBUG(DBG_BDJ, "using %s\n", jar);
++        return jar;
++    }
++
++    // check if overriding the classpath
++    const char *classpath = getenv("LIBBLURAY_CP");
++    if (classpath) {
++        size_t cp_len = strlen(classpath);
++
++        // directory or file ?
++        if (cp_len > 0 && (classpath[cp_len - 1] == '/' || classpath[cp_len - 1] == '\\')) {
++            jar = str_printf("%s%s", classpath, BDJ_JARFILE);
++        } else {
++            jar = str_dup(classpath);
++        }
++
++        if (!jar) {
++            BD_DEBUG(DBG_CRIT, "out of memory\n");
++            return NULL;
++        }
++
++        if (_can_read_file(jar)) {
++            BD_DEBUG(DBG_BDJ, "using %s (LIBBLURAY_CP)\n", jar);
++            return jar;
++        }
++
++        X_FREE(jar);
++        BD_DEBUG(DBG_BDJ | DBG_CRIT, "invalid LIBBLURAY_CP %s\n", classpath);
++    }
++
++    // last resort: current directory
++    BD_DEBUG(DBG_BDJ, "Checking " BDJ_JARFILE " ...\n");
++    if (_can_read_file(BDJ_JARFILE)) {
++        BD_DEBUG(DBG_BDJ, "using " BDJ_JARFILE "\n");
++        return str_dup(BDJ_JARFILE);
++    }
+ 
+     BD_DEBUG(DBG_BDJ | DBG_CRIT, BDJ_JARFILE" not found.\n");
+     return NULL;
+-- 
+2.43.0
+
