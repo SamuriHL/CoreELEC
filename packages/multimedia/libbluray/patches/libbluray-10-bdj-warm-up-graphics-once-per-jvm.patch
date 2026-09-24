@@ -1,4 +1,4 @@
-From 495ad045d483399c709c0d55940bda868e39fca1 Mon Sep 17 00:00:00 2001
+From 414e3eec2eb1abb947dd4a1c5525ddf2676766af Mon Sep 17 00:00:00 2001
 From: SamuriHL <samurihl@msn.com>
 Date: Wed, 23 Sep 2026 22:11:51 -0400
 Subject: [PATCH] bdj: warm up the graphics pipeline once per JVM
@@ -140,7 +140,7 @@ index 0000000..ced6317
 +    }
 +}
 diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
-index 9a5b8ca..2499287 100644
+index e29e483..8185620 100644
 --- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
 +++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
 @@ -406,6 +406,13 @@ public class Libbluray {
