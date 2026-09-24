@@ -1,4 +1,4 @@
-From c7899aff6d211ee70482ca334716f3f2bafc409c Mon Sep 17 00:00:00 2001
+From 9fb1e239df2819633f1a975816546ce0e14f5d7c Mon Sep 17 00:00:00 2001
 From: SamuriHL <samurihl@msn.com>
 Date: Wed, 23 Sep 2026 20:01:10 -0400
 Subject: [PATCH] bdj: DIAG background plane logging
@@ -173,10 +173,10 @@ index 6186460..1fa62f4 100644
          synchronized (this) {
              /* a newer displayImage() replaced this one while decoding */
 diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
-index e29e483..9a5b8ca 100644
+index 8185620..2499287 100644
 --- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
 +++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
-@@ -700,8 +700,10 @@ public class Libbluray {
+@@ -707,8 +707,10 @@ public class Libbluray {
       * updates. rgbArray == null opens the plane (width/height > 0) or closes
       * it (0x0). */
      public static void updateBackground(int width, int height, int[] rgbArray) {
