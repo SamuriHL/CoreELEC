@@ -1,0 +1,162 @@
+From 495ad045d483399c709c0d55940bda868e39fca1 Mon Sep 17 00:00:00 2001
+From: SamuriHL <samurihl@msn.com>
+Date: Wed, 23 Sep 2026 22:11:51 -0400
+Subject: [PATCH] bdj: warm up the graphics pipeline once per JVM
+
+Discs time the player's graphics speed when their menu starts and fall back
+to a simpler menu below a threshold. Superman UHD fills and blits a 720x480
+image 100 times and wants >= 85 per second for its sliding menu; on the
+first disc after the JVM starts the span/blend loops are still interpreted
+and it scores ~63 (a minute later ~101 on the same box), so the first play
+never slides. Standalone players are never cold.
+
+At the end of the first Libbluray.init(), run the same kind of work on
+private offscreen images in a low-priority daemon thread (<= 300 rounds or
+1.5 s) so the JIT compiles those loops first. Nothing is drawn to screen.
+---
+ .../bdj/java/java/awt/BDGraphicsWarmup.java   | 114 ++++++++++++++++++
+ .../bdj/java/org/videolan/Libbluray.java      |   7 ++
+ 2 files changed, 121 insertions(+)
+ create mode 100644 src/libbluray/bdj/java/java/awt/BDGraphicsWarmup.java
+
+diff --git a/src/libbluray/bdj/java/java/awt/BDGraphicsWarmup.java b/src/libbluray/bdj/java/java/awt/BDGraphicsWarmup.java
+new file mode 100644
+index 0000000..ced6317
+--- /dev/null
++++ b/src/libbluray/bdj/java/java/awt/BDGraphicsWarmup.java
+@@ -0,0 +1,114 @@
++/*
++ * This file is part of libbluray
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library. If not, see
++ * <http://www.gnu.org/licenses/>.
++ */
++
++package java.awt;
++
++import org.videolan.Logger;
++
++/*
++ * Warm up the software graphics pipeline once per JVM.
++ *
++ * Discs time the player's graphics speed when their menu starts and pick a
++ * simpler menu below a threshold (e.g. Superman UHD: 100 offscreen fills +
++ * blits, full menu at >= 85 per second). On the first disc after the JVM
++ * started, the span/blend loops still run interpreted and score ~40% below
++ * the same box a minute later, so the disc gets its reduced menu. A standalone
++ * player's graphics are never cold.
++ *
++ * Run the same kind of work on private offscreen images in a low-priority
++ * daemon thread so the JIT compiles those loops before the disc's menu starts.
++ * Nothing is drawn to the screen and no disc state is touched.
++ */
++public final class BDGraphicsWarmup {
++
++    private static final Logger logger = Logger.getLogger(BDGraphicsWarmup.class.getName());
++
++    private static final int  MAX_ROUNDS = 300;
++    private static final long MAX_MS     = 1500;
++
++    private static boolean started = false;
++
++    private BDGraphicsWarmup() {
++    }
++
++    public static synchronized void start() {
++        if (started)
++            return;
++        started = true;
++
++        Thread t = new Thread("BD-J graphics warm-up") {
++            public void run() {
++                try {
++                    warmUp();
++                } catch (Throwable e) {
++                    logger.error("graphics warm-up failed: " + e);
++                }
++            }
++        };
++        t.setDaemon(true);
++        t.setPriority(Thread.MIN_PRIORITY);
++        t.start();
++    }
++
++    private static void warmUp() {
++        /* a parent with a font keeps BDGraphics from asking GUIManager,
++         * which does not exist before the first title loads */
++        Component owner = new Component() {};
++        owner.setFont(new Font("Dialog", Font.PLAIN, 12));
++
++        BDImage src = new BDImage(owner, 720, 480, null);
++        BDImage dst = new BDImage(owner, 1920, 1080, null);
++        Color clear = new Color(0, 0, 0, 0);
++        Color translucent = new Color(40, 80, 120, 128);
++        Color opaque = new Color(200, 160, 120);
++
++        long begin = System.currentTimeMillis();
++        long first = -1, lastTen = 0;
++        int rounds = 0;
++        while (rounds < MAX_ROUNDS && System.currentTimeMillis() - begin < MAX_MS) {
++            long t0 = System.currentTimeMillis();
++
++            Graphics2D g = (Graphics2D)src.getGraphics();
++            g.setComposite(AlphaComposite.SrcOver);
++            g.setColor((rounds % 3) == 0 ? clear : ((rounds % 3) == 1 ? translucent : opaque));
++            g.fillRect(0, 0, 720, 480);
++            g.dispose();
++
++            Graphics2D d = (Graphics2D)dst.getGraphics();
++            d.setComposite(AlphaComposite.SrcOver);
++            d.drawImage(src, 600, 300, null);
++            if ((rounds % 10) == 9) {
++                d.setComposite(AlphaComposite.Clear);
++                d.fillRect(0, 0, 1920, 1080);
++            }
++            d.dispose();
++
++            long dt = System.currentTimeMillis() - t0;
++            if (first < 0)
++                first = dt;
++            if (rounds >= MAX_ROUNDS - 10)
++                lastTen += dt;
++            rounds++;
++        }
++
++        logger.info("graphics warm-up: " + rounds + " rounds in " + (System.currentTimeMillis() - begin)
++                    + "ms (first " + first + "ms"
++                    + (rounds == MAX_ROUNDS ? ", last 10 avg " + (lastTen / 10) + "ms" : ", stopped at time limit")
++                    + ")");
++    }
++}
+diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+index 9a5b8ca..2499287 100644
+--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+@@ -406,6 +406,13 @@ public class Libbluray {
+         }
+ 
+         booted = true;
++
++        /* once per JVM: compile the graphics loops before a disc times them */
++        try {
++            java.awt.BDGraphicsWarmup.start();
++        } catch (Throwable t) {
++            System.err.println("graphics warm-up not started: " + t);
++        }
+     }
+ 
+     /* called only from native code */
+-- 
+2.43.0
+
