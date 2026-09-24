@@ -1,0 +1,193 @@
+From c7899aff6d211ee70482ca334716f3f2bafc409c Mon Sep 17 00:00:00 2001
+From: SamuriHL <samurihl@msn.com>
+Date: Wed, 23 Sep 2026 20:01:10 -0400
+Subject: [PATCH] bdj: DIAG background plane logging
+
+Log every HAVi background path (configuration set, colour, displayImage,
+decode result, render/close, native push) to find why John Wick 3's
+background never reaches the BD_OVERLAY_BG plane. Diagnostic only; drop
+once the cause is known.
+---
+ .../bdj/java/org/havi/ui/BackgroundPlane.java | 25 ++++++++++++++++++-
+ .../org/havi/ui/HBackgroundConfiguration.java |  1 +
+ .../java/org/havi/ui/HBackgroundDevice.java   |  4 ++-
+ .../HStillImageBackgroundConfiguration.java   | 21 +++++++++++++---
+ .../bdj/java/org/videolan/Libbluray.java      |  4 ++-
+ 5 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
+index c3d9bae..f3fa746 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
++++ b/src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java
+@@ -55,9 +55,21 @@ final class BackgroundPlane {
+     private BackgroundPlane() {
+     }
+ 
++    static void log(String msg) {
++        logger.info("background: " + msg);
++    }
++
++    private static String desc(Object o) {
++        if (o == null)
++            return "null";
++        String n = o.getClass().getName();
++        return n.substring(n.lastIndexOf('.') + 1) + "@" + Integer.toHexString(System.identityHashCode(o));
++    }
++
+     /* HBackgroundDevice.setBackgroundConfiguration() */
+     static void configurationChanged(HBackgroundConfiguration hbc) {
+         synchronized (lock) {
++            log("configuration set: " + desc(hbc));
+             current = hbc;
+             touch();
+             render();
+@@ -71,8 +83,12 @@ final class BackgroundPlane {
+                 /* nothing tracked yet (startup, or after a reset): the device
+                  * starts on its default configuration, and re-selecting it is a
+                  * no-op there, so adopt it if it is the device's current one */
+-                if (current != null || hbc != deviceConfiguration())
++                if (current != null || hbc != deviceConfiguration()) {
++                    log("content change on " + desc(hbc) + " not shown: current is " + desc(current)
++                        + ", device has " + desc(deviceConfiguration()));
+                     return; /* shown when it becomes current */
++                }
++                log("adopting the device's configuration " + desc(hbc));
+                 current = hbc;
+             }
+             touch();
+@@ -93,6 +109,7 @@ final class BackgroundPlane {
+     /* BD-J title unload / disc shutdown: back to the transparent default. */
+     static void reset() {
+         synchronized (lock) {
++            log("reset");
+             resetLocked();
+         }
+     }
+@@ -134,6 +151,7 @@ final class BackgroundPlane {
+     private static void render() {
+         HBackgroundConfiguration hbc = current;
+         if (hbc == null) {
++            log("render: no configuration, closing");
+             close();
+             return;
+         }
+@@ -155,6 +173,7 @@ final class BackgroundPlane {
+         }
+ 
+         if ((argb >>> 24) == 0 && img == null) {
++            log("render: " + desc(hbc) + " transparent with no image, closing (open=" + open + ")");
+             close();
+             return;
+         }
+@@ -186,6 +205,10 @@ final class BackgroundPlane {
+         if (img != null && imgW > 0 && imgH > 0 && rect != null)
+             blit(img, imgW, imgH, rect);
+ 
++        log("render: " + desc(hbc) + " " + width + "x" + height + " colour 0x" + Integer.toHexString(argb)
++            + (img != null ? " image " + imgW + "x" + imgH + " at " + rect.x + "," + rect.y + " " + rect.width + "x" + rect.height
++                           : " no image")
++            + (open ? "" : " (opening)"));
+         if (!open) {
+             Libbluray.updateBackground(width, height, null);
+             open = true;
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java b/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
+index eeeb477..b05d419 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HBackgroundConfiguration.java
+@@ -48,6 +48,7 @@ public class HBackgroundConfiguration extends HScreenConfiguration {
+         if (color == null)
+             throw new HConfigurationException();
+         this.color = color;
++        BackgroundPlane.log("setColor 0x" + Integer.toHexString(color.getRGB()));
+         BackgroundPlane.contentChanged(this);
+     }
+ 
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+index 4a31032..588b3f2 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+@@ -80,8 +80,10 @@ public class HBackgroundDevice extends HScreenDevice {
+     public boolean setBackgroundConfiguration(HBackgroundConfiguration hbc)
+             throws SecurityException, HPermissionDeniedException,
+             HConfigurationException {
+-        if (this.hbc == hbc)
++        if (this.hbc == hbc) {
++            BackgroundPlane.log("setBackgroundConfiguration: already current");
+             return true;
++        }
+         this.hbc = hbc;
+         BackgroundPlane.configurationChanged(hbc);
+         return true;
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java b/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+index 6186460..1fa62f4 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+@@ -39,8 +39,10 @@ public class HStillImageBackgroundConfiguration extends
+     public void displayImage(HBackgroundImage image, HScreenRectangle r)
+             throws IOException, HPermissionDeniedException,
+             HConfigurationException {
+-        if (image == null || image.getImage() == null)
++        if (image == null || image.getImage() == null) {
++            BackgroundPlane.log("displayImage: no image" + (image == null ? "" : " (not loaded)"));
+             throw new IOException("no background image");
++        }
+         if (r == null)
+             r = new HScreenRectangle(0.0f, 0.0f, 1.0f, 1.0f);
+ 
+@@ -55,8 +57,11 @@ public class HStillImageBackgroundConfiguration extends
+          * thread (discs call displayImage() from imageLoaded()), so there the
+          * decode moves to a worker. */
+         boolean onFetcher = Thread.currentThread().getName().startsWith("Image Fetcher");
++        BackgroundPlane.log("displayImage on '" + Thread.currentThread().getName() + "' rect "
++                            + r.x + "," + r.y + " " + r.width + "x" + r.height);
+         if (!onFetcher) {
+             int result = decode(image, r, DECODE_WAIT_MS);
++            BackgroundPlane.log("displayImage decode result " + result);
+             if (result == DECODE_FAILED)
+                 throw new IOException("background image decode failed");
+             if (result == DECODE_DONE)
+@@ -80,14 +85,22 @@ public class HStillImageBackgroundConfiguration extends
+         } catch (InterruptedException e) {
+             return DECODE_TIMEOUT;
+         }
+-        if ((pg.getStatus() & (java.awt.image.ImageObserver.ERROR | java.awt.image.ImageObserver.ABORT)) != 0)
++        if ((pg.getStatus() & (java.awt.image.ImageObserver.ERROR | java.awt.image.ImageObserver.ABORT)) != 0) {
++            BackgroundPlane.log("decode: error/abort, status 0x" + Integer.toHexString(pg.getStatus()));
+             return DECODE_FAILED;
+-        if (!done)
++        }
++        if (!done) {
++            BackgroundPlane.log("decode: not done after " + waitMs + "ms, status 0x" + Integer.toHexString(pg.getStatus()));
+             return DECODE_TIMEOUT;
++        }
+ 
+         Object px = pg.getPixels();
+-        if (!(px instanceof int[]) || pg.getWidth() <= 0 || pg.getHeight() <= 0)
++        if (!(px instanceof int[]) || pg.getWidth() <= 0 || pg.getHeight() <= 0) {
++            BackgroundPlane.log("decode: unusable pixels " + (px == null ? "null" : px.getClass().getName())
++                                + " " + pg.getWidth() + "x" + pg.getHeight());
+             return DECODE_FAILED;
++        }
++        BackgroundPlane.log("decode: " + pg.getWidth() + "x" + pg.getHeight());
+ 
+         synchronized (this) {
+             /* a newer displayImage() replaced this one while decoding */
+diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+index e29e483..9a5b8ca 100644
+--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+@@ -700,8 +700,10 @@ public class Libbluray {
+      * updates. rgbArray == null opens the plane (width/height > 0) or closes
+      * it (0x0). */
+     public static void updateBackground(int width, int height, int[] rgbArray) {
+-        if (nativePointer == 0)
++        if (nativePointer == 0) {
++            System.err.println("updateBackground(): no native pointer");
+             return;
++        }
+         try {
+             updateBackgroundN(nativePointer, width, height, rgbArray);
+         } catch (LinkageError e) {
+-- 
+2.43.0
+
