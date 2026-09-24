@@ -26,5 +26,9 @@ pre_configure_target() {
 }
 
 post_makeinstall_target() {
+  # Validate the pair in its sole owning package, whose stamp includes the
+  # shared libbluray patches and JDK through PKG_DEPENDS_UNPACK.
+  test -s "${INSTALL}/usr/share/java/libbluray-j2se-${PKG_VERSION}.jar" || return 1
+  test -s "${INSTALL}/usr/share/java/libbluray-awt-j2se-${PKG_VERSION}.jar" || return 1
   rm -rf ${INSTALL}/usr/lib ${INSTALL}/usr/include
 }
