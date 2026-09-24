@@ -14,6 +14,10 @@
 
 . /etc/profile
 
+# Keep native libbluray and Java classes paired across JRE addon updates.
+# JAVA_HOME still comes from the addon; restart Kodi after installing it.
+[ ! -r /usr/lib/coreelec/bdj-runtime.sh ] || . /usr/lib/coreelec/bdj-runtime.sh
+
 trap cleanup TERM
 
 KODI_ROOT=$HOME/.kodi

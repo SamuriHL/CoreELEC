@@ -127,7 +127,7 @@ configure_package() {
   fi
 
   if [ "${KODI_BLURAY_SUPPORT}" = yes ]; then
-    PKG_DEPENDS_TARGET+=" libbluray"
+    PKG_DEPENDS_TARGET+=" libbluray bdj-runtime"
     KODI_BLURAY="-DENABLE_BLURAY=ON"
   else
     KODI_BLURAY="-DENABLE_BLURAY=OFF"

@@ -1,0 +1,26 @@
+--- a/src/libbluray/bdj/java/java/awt/BDRootWindow.java
++++ b/src/libbluray/bdj/java/java/awt/BDRootWindow.java
+@@ -152,10 +152,13 @@ public class BDRootWindow extends Frame {
+
+         public void run() {
+             synchronized (window) {
+-                if (this.changeCount == window.changeCount)
++                long now = System.currentTimeMillis();
++                if (this.changeCount == window.changeCount || (now - window.lastSyncTime) >= 100) {
+                     window.sync();
+-                else
++                    window.lastSyncTime = now;
++                } else {
+                     this.changeCount = window.changeCount;
++                }
+             }
+         }
+
+@@ -225,6 +228,7 @@ public class BDRootWindow extends Frame {
+     private transient Timer timer = new Timer();
+     private transient TimerTask timerTask = null;
+     private boolean overlay_open = false;
++    transient long lastSyncTime = 0;
+     private Font defaultFont = null;
+
+     private static final Logger logger = Logger.getLogger(BDRootWindow.class.getName());
