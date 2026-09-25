@@ -20,6 +20,8 @@ fi
 for i in ${PKG_DEPENDS_INIT}; do
   PKG_NEED_UNPACK+=" $(get_pkg_directory ${i})"
 done
+# splash art is outside the splash-image package dir; linux inherits this list
+PKG_NEED_UNPACK+=" $(get_pkg_variable splash-image PKG_NEED_UNPACK)"
 
 post_install() {
   if [ "${BUILD_ANDROID_BOOTIMG}" = "yes" ]; then

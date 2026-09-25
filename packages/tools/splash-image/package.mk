@@ -9,6 +9,8 @@ PKG_SITE="https://coreelec.org"
 PKG_URL="https://github.com/CoreELEC/splash-image/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_INIT="toolchain gcc:init glibc libspng zlib"
 PKG_LONGDESC="Boot splash screen supporting animation by single RGBA png files"
+# the splash art lives outside PKG_DIR; rebuild (and re-pack the initramfs) when it changes
+PKG_NEED_UNPACK="${DISTRO_DIR}/${DISTRO}/splash/${DEVICE}"
 
 makeinstall_init() {
   mkdir -p $INSTALL/usr/bin
