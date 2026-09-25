@@ -20,7 +20,7 @@ msgid "Automatically download new builds"
 msgstr ""
 
 msgctxt "#30004"
-msgid "Downloads the matching .tar into /storage/.update. CoreELEC applies it on the next reboot. If disabled, you'll just get a notification and can update manually."
+msgid "Downloads the matching .tar into /storage/.update while nothing is playing. CoreELEC applies it on the next reboot. If disabled, you'll just get a notification and can update manually."
 msgstr ""
 
 msgctxt "#30005"
@@ -32,7 +32,7 @@ msgid "Reboot automatically after download"
 msgstr ""
 
 msgctxt "#30007"
-msgid "Reboots the box as soon as a verified update has been downloaded. Leave off if you want to choose when to reboot."
+msgid "Reboots the box once a verified update has been downloaded, waiting for any playback to stop first. Leave off if you want to choose when to reboot."
 msgstr ""
 
 msgctxt "#30008"
@@ -127,3 +127,10 @@ msgctxt "#30046"
 msgid "Check for latest update"
 msgstr ""
 
+msgctxt "#30050"
+msgid "This box is not running a samurihl build. Installing this will replace it with a samurihl build."
+msgstr ""
+
+msgctxt "#30051"
+msgid "Not a samurihl build - automatic updates are off (Browse releases... still works)"
+msgstr ""
