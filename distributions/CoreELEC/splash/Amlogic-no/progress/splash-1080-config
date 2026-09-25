@@ -1,3 +1,4 @@
 animation_offset_x=560
 animation_offset_y=80
 frames_per_second=20
+animation_loop=0

@@ -1,0 +1,37 @@
+--- a/splash-image.c
++++ b/splash-image.c
+@@ -9,6 +9,8 @@
+ uint32_t screen_size;
+ int fmt = SPNG_FMT_BGRA8;
+ uint8_t end_animation = 0;
++// animation_loop=0 in the config plays frames 1..N once, then shows the full image
++uint8_t animation_loop = 1;
+ 
+ int get_resize_factor(struct fb_var_screeninfo vinfo, struct spng_ihdr ihdr, scale_t *scale)
+ {
+@@ -258,7 +260,16 @@
+ 
+ 	// restart loop with image 1, image 0 is the "full screen" image
+ 	if (files->current == files->count)
++	{
++		if (!animation_loop)
++		{
++			// played once: leave the plain full screen image up and exit
++			memcpy(fbp, out_full_image, screen_size);
++			end_animation = 1;
++			return;
++		}
+ 		files->current = 1;
++	}
+ }
+ 
+ static void handle_signal(int sig)
+@@ -400,6 +411,8 @@
+ 				offset.y = value;
+ 			else if (!strcmp(key, "frames_per_second"))
+ 				framerate = value;
++			else if (!strcmp(key, "animation_loop"))
++				animation_loop = value;
+ 		}
+ 
+ 		fclose(fd);
