@@ -1,0 +1,33 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: list each stream type in PlayItem.getComponents()
+
+PlayItemImpl.getComponents() filled the audio, PG, IG and secondary
+video/audio lists from clip.getVideoStreams(). A BD-J Xlet asking a play
+item for its components got the video streams six times over, labelled
+as video, audio, subtitles, data, secondary video and secondary audio,
+and never the real audio or subtitle streams. Use the matching TIClip
+getter for each list; they return the arrays the clip was built with
+(the stream-count getters already rely on them being non-null).
+
+Unchanged in libbluray 1.5.1 and master.
+
+diff -ruN a/src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java b/src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java
+--- a/src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java	2026-09-25 16:55:22.061404335 -0400
++++ b/src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java	2026-09-25 16:55:22.099464775 -0400
+@@ -67,11 +67,11 @@
+ 
+     public ServiceComponent[] getComponents() {
+         StreamInfo[] video = clip.getVideoStreams();
+-        StreamInfo[] audio = clip.getVideoStreams();
+-        StreamInfo[] pg = clip.getVideoStreams();
+-        StreamInfo[] ig = clip.getVideoStreams();
+-        StreamInfo[] secVideo = clip.getVideoStreams();
+-        StreamInfo[] secAudio = clip.getVideoStreams();
++        StreamInfo[] audio = clip.getAudioStreams();
++        StreamInfo[] pg = clip.getPgStreams();
++        StreamInfo[] ig = clip.getIgStreams();
++        StreamInfo[] secVideo = clip.getSecVideoStreams();
++        StreamInfo[] secAudio = clip.getSecAudioStreams();
+ 
+         int count = video.length + audio.length + pg.length + ig.length + secVideo.length + secAudio.length;
+ 
