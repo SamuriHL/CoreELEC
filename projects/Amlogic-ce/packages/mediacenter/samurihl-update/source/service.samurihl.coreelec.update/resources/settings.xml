@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings version="2">
+    <section id="service.samurihl.coreelec.update">
+        <category id="general" label="30000">
+            <group id="1">
+                <setting id="enabled" type="boolean" label="30001">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="check_interval_hours" type="integer" label="30002">
+                    <level>0</level>
+                    <default>12</default>
+                    <constraints>
+                        <minimum>1</minimum>
+                        <maximum>168</maximum>
+                        <step>1</step>
+                    </constraints>
+                    <control type="slider" format="integer">
+                        <popup>true</popup>
+                    </control>
+                    <dependencies>
+                        <dependency type="enable" setting="enabled">true</dependency>
+                    </dependencies>
+                </setting>
+                <setting id="auto_download" type="boolean" label="30003" help="30004">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle"/>
+                    <dependencies>
+                        <dependency type="enable" setting="enabled">true</dependency>
+                    </dependencies>
+                </setting>
+                <setting id="verify_checksum" type="boolean" label="30005">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                    <dependencies>
+                        <dependency type="enable" setting="auto_download">true</dependency>
+                    </dependencies>
+                </setting>
+                <setting id="auto_reboot" type="boolean" label="30006" help="30007">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle"/>
+                    <dependencies>
+                        <dependency type="enable" setting="auto_download">true</dependency>
+                    </dependencies>
+                </setting>
+                <setting id="notify_only_once_per_build" type="boolean" label="30008">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                    <dependencies>
+                        <dependency type="enable" setting="enabled">true</dependency>
+                    </dependencies>
+                </setting>
+            </group>
+        </category>
+    </section>
+</settings>
