@@ -52,6 +52,26 @@ set -Ux ARCH arm
 
 Don't use `~/.coreelec/options` for these three: the build system sources that file after the target defaults are resolved, so `DEVICE=Amlogic-ng` set there still leaves `ARCH=aarch64` and you end up with a broken hybrid build tree. That file is fine for build tweaks like `CONCURRENCY_MAKE_LEVEL`, not for target selection.
 
+### Binaural audio needs a second, 64-bit pass (Amlogic-ng only)
+
+Kodi renders audio binaurally for headphones (Dolby Atmos and DTS:X objects, Auro-3D heights and ordinary channel layouts alike) by running the decoder and the spatial renderer in a **64-bit helper process**. That is not a preference: a shared library takes the word size of whoever loads it, and in the 32-bit userspace an Amlogic-ng image ships, the same work costs roughly twice as much — measured on an S922X, Dolby Digital Plus Atmos decodes at 0.419 of realtime in 32-bit against 0.204 in 64-bit.
+
+So on `ARCH=arm` the three 64-bit pieces are built in their own tree first, and the image build copies them in:
+
+```sh
+# once, and again whenever omniphony or harletty-bridge moves
+PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=aarch64 ./scripts/build omniphony
+
+# then the image as usual
+PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm make release
+```
+
+That one command builds all three — the engine and its PCM bridge (`omniphony`), the decoder bridge (`harletty-bridge`) and the helper (`omniphony-helper`) — because the first pulls in the other two. It also builds an aarch64 toolchain the first time, which is slow; the arm image build reuses nothing from that tree but the finished objects.
+
+Skipping the pass does not leave you with a quietly broken image: the `omniphony` package stops the build and prints the command above.
+
+**On `ARCH=aarch64` (Amlogic-ne) there is nothing extra to do.** The image is already 64-bit, so one normal build produces everything.
+
 ### Local source checkouts (branch `coreelec-21_local`)
 
 Development happens on `coreelec-21_local`; `coreelec-21` carries the release states it is cut from. The core packages of this fork don't download release tarballs. Their `package.mk` points at a local working copy via a `file://` URL, and whatever is checked out there is what gets built. The build never pulls or resets these checkouts, so verify their state before packaging:

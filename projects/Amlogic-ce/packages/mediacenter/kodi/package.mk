@@ -10,7 +10,12 @@ PKG_SITE="http://www.kodi.tv"
 # Using local xbmc checkout for development
 PKG_URL="file://${ROOT}/sources/kodi/xbmc-local"
 PKG_SOURCE_NAME="xbmc-local"
-PKG_DEPENDS_TARGET="toolchain JsonSchemaBuilder:host TexturePacker:host Python3 zlib systemd lzo pcre swig:host libass curl fontconfig fribidi tinyxml tinyxml2 libjpeg-turbo freetype libcdio taglib libxml2 libxslt rapidjson sqlite ffmpeg crossguid libfmt lirc libfstrcmp flatbuffers:host flatbuffers libudfread spdlog obu_util libdovi skin.p3i.estuary"
+# omniphony brings the spatial audio engine, the decoder bridges and the helper
+# process that runs them, installed beside kodi.bin under /usr/lib/kodi/omniphony.
+# CDVDAudioCodecOmniphony looks for them there and leaves audio to the ordinary
+# decoders if they are absent, so nothing here depends on it at link time - it
+# is listed so a Kodi build pulls the payload into the image.
+PKG_DEPENDS_TARGET="toolchain JsonSchemaBuilder:host TexturePacker:host Python3 zlib systemd lzo pcre swig:host libass curl fontconfig fribidi tinyxml tinyxml2 libjpeg-turbo freetype libcdio taglib libxml2 libxslt rapidjson sqlite ffmpeg crossguid libfmt lirc libfstrcmp flatbuffers:host flatbuffers libudfread spdlog obu_util libdovi skin.p3i.estuary omniphony"
 PKG_DEPENDS_UNPACK="commons-lang3 commons-text groovy"
 PKG_DEPENDS_HOST="toolchain"
 PKG_LONGDESC="A free and open source cross-platform media player."
