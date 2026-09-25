@@ -1,0 +1,129 @@
+# Kodi Media Center language file
+msgid ""
+msgstr ""
+"Language: English (GB)\n"
+
+msgctxt "#30000"
+msgid "General"
+msgstr ""
+
+msgctxt "#30001"
+msgid "Check for updates automatically"
+msgstr ""
+
+msgctxt "#30002"
+msgid "Check interval (hours)"
+msgstr ""
+
+msgctxt "#30003"
+msgid "Automatically download new builds"
+msgstr ""
+
+msgctxt "#30004"
+msgid "Downloads the matching .tar into /storage/.update. CoreELEC applies it on the next reboot. If disabled, you'll just get a notification and can update manually."
+msgstr ""
+
+msgctxt "#30005"
+msgid "Verify checksum before installing"
+msgstr ""
+
+msgctxt "#30006"
+msgid "Reboot automatically after download"
+msgstr ""
+
+msgctxt "#30007"
+msgid "Reboots the box as soon as a verified update has been downloaded. Leave off if you want to choose when to reboot."
+msgstr ""
+
+msgctxt "#30008"
+msgid "Only notify once per new build"
+msgstr ""
+
+msgctxt "#30020"
+msgid "SamuriHL CoreELEC Update"
+msgstr ""
+
+msgctxt "#30021"
+msgid "Checking for updates..."
+msgstr ""
+
+msgctxt "#30022"
+msgid "New build available: {0}"
+msgstr ""
+
+msgctxt "#30023"
+msgid "You're up to date ({0})"
+msgstr ""
+
+msgctxt "#30024"
+msgid "Could not check for updates - see log"
+msgstr ""
+
+msgctxt "#30025"
+msgid "Downloading {0}"
+msgstr ""
+
+msgctxt "#30026"
+msgid "Verifying checksum..."
+msgstr ""
+
+msgctxt "#30027"
+msgid "Checksum mismatch - download discarded"
+msgstr ""
+
+msgctxt "#30028"
+msgid "Update downloaded and verified. Reboot to install?"
+msgstr ""
+
+msgctxt "#30029"
+msgid "Update ready - reboot when convenient to install"
+msgstr ""
+
+msgctxt "#30030"
+msgid "No .tar asset found in latest release"
+msgstr ""
+
+msgctxt "#30031"
+msgid "Download failed - see log"
+msgstr ""
+
+msgctxt "#30032"
+msgid "Could not determine installed version"
+msgstr ""
+
+msgctxt "#30033"
+msgid "Reboot now"
+msgstr ""
+
+msgctxt "#30034"
+msgid "Later"
+msgstr ""
+
+msgctxt "#30040"
+msgid "Browse releases..."
+msgstr ""
+
+msgctxt "#30041"
+msgid "installed"
+msgstr ""
+
+msgctxt "#30042"
+msgid "older than installed"
+msgstr ""
+
+msgctxt "#30043"
+msgid "no checksum"
+msgstr ""
+
+msgctxt "#30044"
+msgid "Download and stage {0}? This will replace any update currently waiting in /storage/.update."
+msgstr ""
+
+msgctxt "#30045"
+msgid "Download"
+msgstr ""
+
+msgctxt "#30046"
+msgid "Check for latest update"
+msgstr ""
+
