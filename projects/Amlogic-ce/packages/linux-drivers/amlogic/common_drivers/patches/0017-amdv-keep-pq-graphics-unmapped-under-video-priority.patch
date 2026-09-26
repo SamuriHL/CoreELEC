@@ -1,0 +1,80 @@
+From: matthane <matthan.evans@icloud.com>
+Subject: amdv: keep PQ graphics unmapped under video priority
+
+Port of CoreELEC/common_drivers PR #41 (matthane, fc6903ed60 + 59183db15d),
+re-anchored around our 0001/0015: hunks 1 and 3 conflicted on context only.
+
+In TV-led Dolby Vision with video priority, graphics are declared with the
+sink's luminance range, so PQ subtitles and GUI already composed for the
+display are desaturated and dim with each scene of DV content. Declare a
+fixed 2-3 cd/m2 range for HDR10/HDR8 graphics instead, a band inside every
+v1/v2 VSVDB target range, so the DM leaves them unmapped. amdv_graphic_max
+and certification mode keep precedence.
+
+amdv_graphic_follow_video (default 0) restores the scene-adaptive mapping.
+
+On this build Kodi composites the whole GUI into an HDR8 FBO, so in TV-led
+this covers the GUI/OSD as well as PGS, and it overrides patch 0015's
+amdv_graphics_from_sink choice (the "DV GUI sink peak" setting) there.
+Player-led (G_PRIORITY) and VS10 HDR10 output (amdv_graphic_max set) are
+untouched.
+
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -431,6 +431,10 @@
+ MODULE_PARM_DESC(amdv_graphic_min, "\n amdv_graphic_min\n");
+ module_param(amdv_graphic_max, uint, 0664);
+ MODULE_PARM_DESC(amdv_graphic_max, "\n amdv_graphic_max\n");
++static unsigned int amdv_graphic_follow_video;
++static unsigned int old_amdv_graphic_follow_video;
++module_param(amdv_graphic_follow_video, uint, 0664);
++MODULE_PARM_DESC(amdv_graphic_follow_video, "\n amdv_graphic_follow_video\n");
+ 
+ /* Under FLAG_USE_SINK_MIN_MAX the graphics (OSD) peak/min follow the sink's
+  * VSVDB/HDR metadata. 0 keeps the per-format graphics table (DV: 300 nits) as
+@@ -453,6 +457,11 @@
+ MODULE_PARM_DESC(amdv_target_max_override, "\n amdv_target_max_override\n");
+ 
+ static unsigned int dv_HDR10_graphics_max = 300;
++/* declared for PQ graphics under video priority: a band inside every
++ * v1/v2 VSVDB target range, not the content range
++ */
++#define DV_PQ_GRAPHIC_MIN_LUM	20000	/* 0.0001 nits */
++#define DV_PQ_GRAPHIC_MAX_LUM	30000	/* 0.0001 nits */
+ static unsigned int dv_graphic_blend_test;
+ module_param(dv_graphic_blend_test, uint, 0664);
+ MODULE_PARM_DESC(dv_graphic_blend_test, "\n dv_graphic_blend_test\n");
+@@ -1763,6 +1772,18 @@
+ 			force_set_lut = true;
+ 		}
+ 	}
++	if (old_amdv_graphic_follow_video != amdv_graphic_follow_video) {
++		if (debug_dolby & 0x2)
++			pr_dv_dbg("graphic follow video changed %d-%d\n",
++				  old_amdv_graphic_follow_video,
++				  amdv_graphic_follow_video);
++		if (!is_osd_off[0]) {
++			old_amdv_graphic_follow_video =
++				amdv_graphic_follow_video;
++			ret |= 2;
++			force_set_lut = true;
++		}
++	}
+ 	return ret;
+ }
+ 
+@@ -10984,6 +11005,14 @@
+ 
+ 	new_m_dovi_setting.set_graphic_min_lum = graphic_min;
+ 	new_m_dovi_setting.set_graphic_max_lum = graphic_max * 10000;
++	if (pri_mode == V_PRIORITY && !amdv_graphic_max &&
++	    !amdv_graphic_follow_video &&
++	    !(dolby_vision_flags & FLAG_CERTIFICATION) &&
++	    (new_m_dovi_setting.input[IPCORE2_ID].src_format == FORMAT_HDR10 ||
++	     new_m_dovi_setting.input[IPCORE2_ID].src_format == FORMAT_HDR8)) {
++		new_m_dovi_setting.set_graphic_min_lum = DV_PQ_GRAPHIC_MIN_LUM;
++		new_m_dovi_setting.set_graphic_max_lum = DV_PQ_GRAPHIC_MAX_LUM;
++	}
+ 	/* amdv_target_min/max_override (patch 0001) must win here too: this is
+ 	 * the only control-path call site a CMv4.0 dovi.ko ever reaches, since
+ 	 * such a module exports multi_control_path and no control_path.

@@ -119,3 +119,11 @@ drivers/media/enhancement/amvecm/set_hdr2_v0.c:rgb2ycbcr_ncl2020 : rgb2ycbcr_709
 drivers/media/enhancement/amvecm/set_hdr2_v0.c:if ((hdr_process_select & HDR_BYPASS) && !osd_pq_pass):1
 drivers/media/enhancement/amvecm/amcsc.c:if (osd_pq_passthrough != cur_osd_pq_passthrough) {:1
 drivers/media/enhancement/amvecm/amcsc.c:cur_osd_pq_passthrough = osd_pq_passthrough;:1
+
+# --- 0017: PQ graphics unmapped under video priority (upstream PR #41) --------
+drivers/media/enhancement/amdolby_vision/amdv.c:module_param(amdv_graphic_follow_video, uint, 0664);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_max_lum = DV_PQ_GRAPHIC_MAX_LUM;:1
+#   tail of the is_graphic_changed hunk (the live A/B re-latch)
+drivers/media/enhancement/amdolby_vision/amdv.c:old_amdv_graphic_follow_video =:1
+drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_min_lum = DV_PQ_GRAPHIC_MIN_LUM;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:pr_dv_dbg("graphic follow video changed %d-%d\n",:1
