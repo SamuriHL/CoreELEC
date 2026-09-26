@@ -12,19 +12,23 @@ started only when the Handshake won the race - most starts hung on a
 black screen with the menu xlet's worker waiting for a start that never
 came.
 
-Keep the early init, but hide it: a proxy only the loader has touched
-reports NOT_LOADED while it is LOADED or PAUSED, and its init sends no
-state-change event. Any application call on the proxy (load, init,
-start, stop, pause, resume) ends that. start() on the pre-initialised
-xlet goes straight to startXlet().
+Keep the early init, but hide it: a fresh proxy only the loader has
+touched reports NOT_LOADED while it is LOADED or PAUSED, and its init
+sends no state-change event. Any application call on the proxy (load,
+init, start, stop, pause, resume) or the xlet's own notifyPaused /
+notifyDestroyed ends that. start() on the pre-initialised xlet goes
+straight to startXlet(). An application that load()s or init()s a xlet
+it was shown as NOT_LOADED gets a success event, as it would on a
+player, although the loader already did the work. A proxy kept from the
+previous title is not hidden.
 
 Present since "Only autostart when requested" (2013); unchanged in
 libbluray 1.5.1 and master.
 
 diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
 --- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-07-17 05:55:51.000000000 -0400
-+++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-09-26 16:58:01.084604165 -0400
-@@ -60,10 +60,29 @@
++++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-09-26 17:01:09.084288292 -0400
+@@ -60,11 +60,34 @@
      }
  
      public int getState() {
@@ -42,7 +46,9 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
 +
 +    /* loader only: initialise a PRESENT xlet ahead of its start */
 +    protected void initPresent() {
-+        presentOnly = true;
++        /* only a fresh proxy: one kept from the previous title keeps its state */
++        if (state == NOT_LOADED)
++            presentOnly = true;
 +        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
 +        synchronized (cmds) {
 +            cmds.addLast(cmd);
@@ -51,19 +57,25 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
      }
  
      public void load() {
++        boolean hidden = presentOnly;
 +        presentOnly = false;
          AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
++        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -72,6 +91,7 @@
+             cmds.notifyAll();
+@@ -72,7 +95,10 @@
      }
  
      public void init() {
++        boolean hidden = presentOnly;
 +        presentOnly = false;
          AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
++        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -84,6 +104,7 @@
+             cmds.notifyAll();
+@@ -84,6 +110,7 @@
      }
  
      public void start(String[] args) {
@@ -71,7 +83,7 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
          AppCommand cmd = new AppCommand(AppCommand.CMD_START, args);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -92,6 +113,7 @@
+@@ -92,6 +119,7 @@
      }
  
      public void stop(boolean force, int timeout) {
@@ -79,7 +91,7 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
          AppCommand cmd = new AppCommand(AppCommand.CMD_STOP, Boolean.valueOf(force));
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -109,6 +131,7 @@
+@@ -109,6 +137,7 @@
      }
  
      public void pause() {
@@ -87,7 +99,7 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
          AppCommand cmd = new AppCommand(AppCommand.CMD_PAUSE, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -117,6 +140,7 @@
+@@ -117,6 +146,7 @@
      }
  
      public void resume() {
@@ -95,7 +107,44 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
          AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -389,7 +413,9 @@
+@@ -350,14 +380,20 @@
+             int fromState = state;
+             int toState;
+             boolean ret;
++            /* an application loading or initialising a xlet it was shown as
++             * NOT_LOADED gets the success a player would report, even though
++             * the loader already did the work */
++            boolean hiddenDone = cmd.isHidden() && (state == LOADED || state == PAUSED);
++            if (hiddenDone)
++                fromState = NOT_LOADED;
+             switch (cmd.getCommand()) {
+             case AppCommand.CMD_LOAD:
+                 toState = LOADED;
+-                ret = doLoad();
++                ret = doLoad() || hiddenDone;
+                 break;
+             case AppCommand.CMD_INIT:
+                 toState = PAUSED;
+-                ret = doInit();
++                ret = doInit() || hiddenDone;
+                 break;
+             case AppCommand.CMD_START:
+                 toState = STARTED;
+@@ -377,11 +413,13 @@
+                 ret = doResume();
+                 break;
+             case AppCommand.CMD_NOTIFY_DESTROYED:
++                presentOnly = false;
+                 toState = DESTROYED;
+                 state = DESTROYED;
+                 ret = true;
+                 break;
+             case AppCommand.CMD_NOTIFY_PAUSED:
++                presentOnly = false;
+                 toState = PAUSED;
+                 state = PAUSED;
+                 ret = true;
+@@ -389,7 +427,9 @@
              default:
                  return;
              }
@@ -106,7 +155,7 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
              cmd.release();
              if (state == DESTROYED)
                  state = NOT_LOADED;
-@@ -398,7 +424,8 @@
+@@ -398,7 +438,8 @@
  
      private BDJXletContext context;
      private Xlet xlet;
@@ -116,6 +165,29 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
+@@ -431,6 +472,14 @@
+             return arg;
+         }
+ 
++        public void setHidden(boolean hidden) {
++            this.hidden = hidden;
++        }
++
++        public boolean isHidden() {
++            return hidden;
++        }
++
+         public boolean waitDone(int timeoutMs) {
+             synchronized (this) {
+                 while (!done) {
+@@ -466,6 +515,7 @@
+ 
+         private int cmd;
+         private Object arg;
++        private boolean hidden = false;
+         private boolean done = false;
+     }
+ }
 diff -ru a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
 --- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:57:39.106039947 -0400
 +++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:58:01.084935881 -0400
