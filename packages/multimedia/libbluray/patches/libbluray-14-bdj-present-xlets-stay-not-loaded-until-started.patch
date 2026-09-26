@@ -1,0 +1,130 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: a PRESENT xlet reads NOT_LOADED until an application starts it
+
+BDJLoader initialises every PRESENT xlet as soon as a title starts, and
+the xlet's AppProxy then reports PAUSED. A player does not load a
+PRESENT xlet until an application starts it. BD+ Handshake xlets rely on
+that: Turbo 3D's com.macrovision.bdplus.Handshake.exitToXlet() starts the
+disc's menu xlet (StandardMenuXlet) only if its proxy reports NOT_LOADED,
+and otherwise logs "Application state wasn't NOT_LOADED" and stops. The
+loader's init ran on the menu xlet's own thread in parallel, so the disc
+started only when the Handshake won the race - most starts hung on a
+black screen with the menu xlet's worker waiting for a start that never
+came.
+
+Keep the early init, but hide it: a proxy only the loader has touched
+reports NOT_LOADED while it is LOADED or PAUSED, and its init sends no
+state-change event. Any application call on the proxy (load, init,
+start, stop, pause, resume) ends that. start() on the pre-initialised
+xlet goes straight to startXlet().
+
+Present since "Only autostart when requested" (2013); unchanged in
+libbluray 1.5.1 and master.
+
+diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
+--- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-07-17 05:55:51.000000000 -0400
++++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-09-26 16:58:01.084604165 -0400
+@@ -60,10 +60,29 @@
+     }
+ 
+     public int getState() {
+-        return state;
++        /* A PRESENT xlet that only the loader has touched (initPresent()) is
++         * still NOT_LOADED to the disc: a player loads it only when an
++         * application starts it. BD+ Handshake xlets (Turbo 3D) start the
++         * disc's menu xlet only while it reports NOT_LOADED, and the early
++         * init raced them. */
++        int s = state;
++        if (presentOnly && (s == LOADED || s == PAUSED))
++            return NOT_LOADED;
++        return s;
++    }
++
++    /* loader only: initialise a PRESENT xlet ahead of its start */
++    protected void initPresent() {
++        presentOnly = true;
++        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
++        synchronized (cmds) {
++            cmds.addLast(cmd);
++            cmds.notifyAll();
++        }
+     }
+ 
+     public void load() {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -72,6 +91,7 @@
+     }
+ 
+     public void init() {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -84,6 +104,7 @@
+     }
+ 
+     public void start(String[] args) {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_START, args);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -92,6 +113,7 @@
+     }
+ 
+     public void stop(boolean force, int timeout) {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_STOP, Boolean.valueOf(force));
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -109,6 +131,7 @@
+     }
+ 
+     public void pause() {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_PAUSE, null);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -117,6 +140,7 @@
+     }
+ 
+     public void resume() {
++        presentOnly = false;
+         AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+@@ -389,7 +413,9 @@
+             default:
+                 return;
+             }
+-            notifyListeners(fromState, toState, !ret);
++            /* the loader's early init is invisible to applications */
++            if (!(presentOnly && cmd.getCommand() == AppCommand.CMD_INIT))
++                notifyListeners(fromState, toState, !ret);
+             cmd.release();
+             if (state == DESTROYED)
+                 state = NOT_LOADED;
+@@ -398,7 +424,8 @@
+ 
+     private BDJXletContext context;
+     private Xlet xlet;
+-    private int state;
++    private volatile int state;
++    private volatile boolean presentOnly = false;
+     private LinkedList listeners = new LinkedList();
+     private LinkedList cmds = new LinkedList();
+     private Thread thread;
+diff -ru a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
+--- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:57:39.106039947 -0400
++++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:58:01.084935881 -0400
+@@ -297,7 +297,7 @@
+                     proxys[i].start();
+                 } else if (code == AppEntry.PRESENT) {
+                     logger.info("Init xlet " + i + ": " + appTable[i].getInitialClass());
+-                    proxys[i].init();
++                    proxys[i].initPresent();
+                 } else {
+                     logger.info("Unsupported xlet code (" +code+") xlet " + i + ": " + appTable[i].getInitialClass());
+                 }
