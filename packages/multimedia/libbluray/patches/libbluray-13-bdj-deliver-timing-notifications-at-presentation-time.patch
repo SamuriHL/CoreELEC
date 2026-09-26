@@ -1,0 +1,357 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: bdj: deliver the reader's timing notifications at presentation time
+
+A player buffers ahead of the picture - Kodi reads up to 16 s ahead - and
+libbluray hands the BD-J application its timing notifications as the
+reader produces them: play marks, playitem and chapter changes, end of
+playlist, and the PSR 8 presentation time. The application then lives up
+to the buffer depth in the future. Measured on M3GAN 2.0: its menu
+background (a 4 h loop, 243 repeats of one clip) was read 14 s ahead of
+the screen, and the application's notion of where playback was ran that
+far ahead of what the viewer saw. A licensed player keeps the application
+on the presentation clock.
+
+Add opt-in presentation timing for BD-J titles. When enabled with
+bd_bdj_set_presentation_timing(), the reader's timing notifications and
+PSR 8 writes are held in a numbered queue (consecutive time updates
+collapse). The player stamps bd_bdj_pending_seq() with its read position
+and calls bd_bdj_release() when the picture reaches it. The application's
+media clock (Libbluray.tellTime) reports the presented position.
+
+Unchanged: HDMV titles, user input, register writes by the application,
+rate changes. Everything held is released first on a seek, a playlist
+close and a BD-J start/stop/close, so a mixed disc's HDMV title reads the
+registers the application actually saw. Disabled by default; a player
+that never enables it gets libbluray's existing behaviour.
+
+---
+diff -ruN a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.c	2026-09-26 14:38:10.624086834 -0400
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c	2026-09-26 14:38:57.517900702 -0400
+@@ -335,7 +335,7 @@
+ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
+         jclass cls, jlong np) {
+     BLURAY* bd = (BLURAY*)(intptr_t)np;
+-    return bd_tell_time(bd);
++    return bdpriv_bdj_tell_time(bd);
+ }
+ 
+ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
+diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+--- a/src/libbluray/bluray.c	2026-09-26 14:38:10.611589796 -0400
++++ b/src/libbluray/bluray.c	2026-09-26 14:38:57.517560391 -0400
+@@ -155,6 +155,27 @@
+      */
+     uint8_t         end_of_playlist; /* 1 - reached. 3 - processed . */
+     uint8_t         app_scr;         /* 1 if application provides presentation timetamps */
++
++    /* BD-J presentation timing (bd_bdj_set_presentation_timing()).
++     * The reader runs ahead of what is on screen by the player's queue depth.
++     * While enabled and a BD-J title plays, the timing notifications the
++     * reader produces (mark, playitem, chapter, end of playlist) and the
++     * PSR 8 presentation time are held here, each with a sequence number, and
++     * handed to BD-J only when the player reports that the picture reached
++     * the point where they were read (bd_bdj_release()). */
++    uint8_t         bdj_pt_enabled;
++    uint8_t         bdj_pt_releasing;
++    uint8_t         bdj_pt_presented_valid;
++    uint32_t        bdj_pt_seq;
++    uint64_t        bdj_pt_presented_time; /* title time, 1/90000 s */
++    unsigned        bdj_pt_head, bdj_pt_count;
++    struct {
++        uint32_t seq;
++        uint8_t  is_time;   /* 1 = PSR 8 write, 0 = BD-J event */
++        uint32_t ev;
++        uint32_t param;
++        uint64_t title_time;
++    } bdj_pt_queue[256];
+     uint8_t         uo_restriction_level; /* 0 to ignore UO restrictions */
+ 
+     /* HDMV */
+@@ -273,6 +294,25 @@
+  * PSR utils
+  */
+ 
++static int  _bdj_pt_active(BLURAY *bd);
++static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, uint64_t title_time);
++static void _bdj_pt_release(BLURAY *bd, uint32_t upto, int all);
++
++/* PSR 8 is the presentation time. Under BD-J presentation timing the
++ * reader's value is held until the picture reaches it. */
++static void _write_time_psr(BLURAY *bd, const NAV_CLIP *clip, uint32_t time)
++{
++    if (clip && _bdj_pt_active(bd)) {
++        uint64_t title_time = 0;
++        if (time >= clip->in_time) {
++            title_time = ((uint64_t)(time - clip->in_time) + clip->title_time) * 2;
++        }
++        _bdj_pt_push(bd, 1, 0, time, title_time);
++        return;
++    }
++    bd_psr_write(bd->regs, PSR_TIME, time);
++}
++
+ static void _update_time_psr(BLURAY *bd, uint32_t time)
+ {
+     /*
+@@ -293,7 +333,7 @@
+         return;
+     }
+ 
+-    bd_psr_write(bd->regs, PSR_TIME, time);
++    _write_time_psr(bd, bd->st0.clip, time);
+ }
+ 
+ static uint32_t _update_time_psr_from_stream(BLURAY *bd)
+@@ -376,7 +416,7 @@
+     uint32_t psr_val;
+ 
+     bd_psr_write(bd->regs, PSR_PLAYITEM, clip->ref);
+-    bd_psr_write(bd->regs, PSR_TIME,     clip->in_time);
++    _write_time_psr(bd, clip, clip->in_time);
+ 
+     /* Validate selected audio, subtitle and IG stream PSRs */
+     if (stn->num_audio) {
+@@ -1556,12 +1596,98 @@
+         }
+     }
+ 
++    _bdj_pt_release(bd, 0, 1);
++    bd->bdj_pt_presented_valid = 0;
+     return !bdj_process_event(bd->bdjava, BDJ_EVENT_START, title);
+ }
+ 
++static int _bdj_pt_active(BLURAY *bd)
++{
++    return bd->bdj_pt_enabled && !bd->bdj_pt_releasing &&
++           bd->title_type == title_bdj && bd->bdjava != NULL;
++}
++
++static void _bdj_pt_deliver(BLURAY *bd, unsigned idx)
++{
++    bd->bdj_pt_releasing = 1;
++    if (bd->bdj_pt_queue[idx].is_time) {
++        bd->bdj_pt_presented_time  = bd->bdj_pt_queue[idx].title_time;
++        bd->bdj_pt_presented_valid = 1;
++        /* the write callback delivers BDJ_EVENT_PTS */
++        bd_psr_write(bd->regs, PSR_TIME, bd->bdj_pt_queue[idx].param);
++    } else if (bd->bdjava != NULL) {
++        bdj_process_event(bd->bdjava, bd->bdj_pt_queue[idx].ev, bd->bdj_pt_queue[idx].param);
++    }
++    bd->bdj_pt_releasing = 0;
++}
++
++static void _bdj_pt_release(BLURAY *bd, uint32_t upto, int all)
++{
++    const unsigned size = sizeof(bd->bdj_pt_queue) / sizeof(bd->bdj_pt_queue[0]);
++    while (bd->bdj_pt_count > 0) {
++        unsigned idx = bd->bdj_pt_head;
++        if (!all && (int32_t)(bd->bdj_pt_queue[idx].seq - upto) > 0) {
++            break;
++        }
++        bd->bdj_pt_head = (bd->bdj_pt_head + 1) % size;
++        bd->bdj_pt_count--;
++        _bdj_pt_deliver(bd, idx);
++    }
++}
++
++static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, uint64_t title_time)
++{
++    const unsigned size = sizeof(bd->bdj_pt_queue) / sizeof(bd->bdj_pt_queue[0]);
++    unsigned idx;
++
++    /* consecutive time updates collapse into the newest one */
++    if (is_time && bd->bdj_pt_count > 0) {
++        idx = (bd->bdj_pt_head + bd->bdj_pt_count - 1) % size;
++        if (bd->bdj_pt_queue[idx].is_time) {
++            bd->bdj_pt_queue[idx].seq        = ++bd->bdj_pt_seq;
++            bd->bdj_pt_queue[idx].param      = param;
++            bd->bdj_pt_queue[idx].title_time = title_time;
++            return;
++        }
++    }
++
++    if (bd->bdj_pt_count == size) {
++        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "BD-J presentation timing: queue full, delivering oldest early\n");
++        idx = bd->bdj_pt_head;
++        bd->bdj_pt_head = (bd->bdj_pt_head + 1) % size;
++        bd->bdj_pt_count--;
++        _bdj_pt_deliver(bd, idx);
++    }
++
++    idx = (bd->bdj_pt_head + bd->bdj_pt_count) % size;
++    bd->bdj_pt_queue[idx].seq        = ++bd->bdj_pt_seq;
++    bd->bdj_pt_queue[idx].is_time    = (uint8_t)is_time;
++    bd->bdj_pt_queue[idx].ev         = ev;
++    bd->bdj_pt_queue[idx].param      = param;
++    bd->bdj_pt_queue[idx].title_time = title_time;
++    bd->bdj_pt_count++;
++}
++
+ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
+ {
+     if (bd->bdjava != NULL) {
++        if (_bdj_pt_active(bd)) {
++            switch (ev) {
++                /* produced by the reader: hold until presented */
++                case BDJ_EVENT_MARK:
++                case BDJ_EVENT_PLAYITEM:
++                case BDJ_EVENT_CHAPTER:
++                case BDJ_EVENT_END_OF_PLAYLIST:
++                    _bdj_pt_push(bd, 0, ev, param, 0);
++                    return 0;
++                /* a seek re-anchors everything: what was held is history */
++                case BDJ_EVENT_SEEK:
++                    _bdj_pt_release(bd, 0, 1);
++                    break;
++                default:
++                    break;
++            }
++        }
+         return bdj_process_event(bd->bdjava, ev, param);
+     }
+     return -1;
+@@ -1569,6 +1695,8 @@
+ 
+ static void _stop_bdj(BLURAY *bd)
+ {
++    _bdj_pt_release(bd, 0, 1);
++    bd->bdj_pt_presented_valid = 0;
+     if (bd->bdjava != NULL) {
+         bdj_process_event(bd->bdjava, BDJ_EVENT_STOP, 0);
+         _queue_event(bd, BD_EVENT_STILL, 0);
+@@ -1578,6 +1706,7 @@
+ 
+ static void _close_bdj(BLURAY *bd)
+ {
++    _bdj_pt_release(bd, 0, 1);
+     if (bd->bdjava != NULL) {
+         bdj_close(bd->bdjava);
+         bd->bdjava = NULL;
+@@ -2536,6 +2665,12 @@
+ 
+ static void _close_playlist(BLURAY *bd)
+ {
++    /* the program left this playlist: whatever it has not been shown yet it
++     * will not be shown, so hand it over now (the behaviour without
++     * presentation timing) and forget the presented position */
++    _bdj_pt_release(bd, 0, 1);
++    bd->bdj_pt_presented_valid = 0;
++
+     if (bd->graphics_controller) {
+         gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
+     }
+@@ -4093,6 +4228,54 @@
+     bd_mutex_unlock(&bd->mutex);
+ }
+ 
++void bd_bdj_set_presentation_timing(BLURAY *bd, int enable)
++{
++    bd_mutex_lock(&bd->mutex);
++    if (!enable) {
++        _bdj_pt_release(bd, 0, 1);
++        bd->bdj_pt_presented_valid = 0;
++    }
++    bd->bdj_pt_enabled = !!enable;
++    bd_mutex_unlock(&bd->mutex);
++}
++
++uint32_t bd_bdj_pending_seq(BLURAY *bd)
++{
++    uint32_t seq;
++    bd_mutex_lock(&bd->mutex);
++    seq = bd->bdj_pt_count ? bd->bdj_pt_seq : 0;
++    bd_mutex_unlock(&bd->mutex);
++    return seq;
++}
++
++void bd_bdj_release(BLURAY *bd, uint32_t seq)
++{
++    bd_mutex_lock(&bd->mutex);
++    _bdj_pt_release(bd, seq, 0);
++    bd_mutex_unlock(&bd->mutex);
++}
++
++void bd_bdj_release_all(BLURAY *bd)
++{
++    bd_mutex_lock(&bd->mutex);
++    _bdj_pt_release(bd, 0, 1);
++    bd_mutex_unlock(&bd->mutex);
++}
++
++uint64_t bdpriv_bdj_tell_time(BLURAY *bd)
++{
++    uint64_t t = 0;
++    int valid;
++    bd_mutex_lock(&bd->mutex);
++    valid = bd->bdj_pt_enabled && bd->title_type == title_bdj && bd->bdj_pt_presented_valid;
++    if (valid) {
++        t = bd->bdj_pt_presented_time;
++    }
++    bd_mutex_unlock(&bd->mutex);
++    /* nothing presented yet in this playlist: the read position is exact */
++    return valid ? t : bd_tell_time(bd);
++}
++
+ static int _get_rate_uo_index(BLURAY *bd, uint32_t rate, bd_uo_mask_index_e *uo_index)
+ {
+     if (BLURAY_RATE_PAUSED == rate) {
+diff -ruN a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+--- a/src/libbluray/bluray.h	2026-09-26 14:38:10.615771149 -0400
++++ b/src/libbluray/bluray.h	2026-09-26 14:38:57.517778235 -0400
+@@ -1147,6 +1147,42 @@
+  */
+ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
+ 
++/*
++ * BD-J presentation timing.
++ *
++ * The reader runs ahead of the picture by the player's buffer depth. When
++ * enabled, while a BD-J title plays, the notifications the reader produces for
++ * the BD-J application (play mark, playitem, chapter, end of playlist) and the
++ * PSR 8 presentation time are held and numbered instead of delivered, and the
++ * application's media clock reports the presented position. The player
++ * stamps bd_bdj_pending_seq() with the read position after each read and
++ * calls bd_bdj_release() when the picture reaches it. HDMV titles, user input,
++ * register writes by the application, seeks and title changes are unaffected;
++ * anything held is released before a seek, a playlist change or a title change.
++ */
++#define BD_BDJ_PRESENTATION_TIMING 1
++
++/**
++ *  Enable or disable BD-J presentation timing (default: disabled).
++ *  Disabling releases everything held.
++ */
++BD_PUBLIC void     bd_bdj_set_presentation_timing(BLURAY *bd, int enable);
++
++/**
++ *  Sequence number of the newest held item, or 0 when nothing is held.
++ */
++BD_PUBLIC uint32_t bd_bdj_pending_seq(BLURAY *bd);
++
++/**
++ *  Deliver every held item numbered up to and including seq.
++ */
++BD_PUBLIC void     bd_bdj_release(BLURAY *bd, uint32_t seq);
++
++/**
++ *  Deliver everything held (flush, seek, stop).
++ */
++BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
++
+ /**
+  *
+  *  Set current playback rate.
+diff -ruN a/src/libbluray/bluray_internal.h b/src/libbluray/bluray_internal.h
+--- a/src/libbluray/bluray_internal.h	2026-09-26 14:38:10.619773967 -0400
++++ b/src/libbluray/bluray_internal.h	2026-09-26 14:38:57.517853389 -0400
+@@ -71,6 +71,9 @@
+ 
+ BD_PRIVATE int      bdpriv_play_playlist_at(struct bluray *bd, int playlist, int playitem, int playmark, int64_t time);
+ BD_PRIVATE void     bdpriv_select_rate(struct bluray *bd, float rate, int reason);
++
++/* media time for BD-J: the presented position under presentation timing */
++BD_PRIVATE uint64_t bdpriv_bdj_tell_time(struct bluray *bd);
+ BD_PRIVATE int      bdpriv_seek(struct bluray *bd, int playitem, int playmark, int64_t time);
+ BD_PRIVATE int      bdpriv_sound_effect(struct bluray *bd, int id);
+ 
