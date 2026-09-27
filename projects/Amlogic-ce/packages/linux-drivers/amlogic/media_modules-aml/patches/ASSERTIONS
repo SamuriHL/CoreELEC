@@ -8,3 +8,6 @@ drivers/stream_input/amports/amstream.c:static u32 vbuf_checkin_offset(struct st
 drivers/stream_input/amports/amstream.c:return threadrw_dataoffset(vbuf);:1
 drivers/stream_input/amports/amstream.c:vbuf_checkin_offset(vbuf), :3
 drivers/stream_input/amports/amstream.c:vbuf->stream_offset, pts);:0
+
+# --- 0002: slave programs the stream write pointer (dual-layer, no parser) ---
+drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master's last run:2

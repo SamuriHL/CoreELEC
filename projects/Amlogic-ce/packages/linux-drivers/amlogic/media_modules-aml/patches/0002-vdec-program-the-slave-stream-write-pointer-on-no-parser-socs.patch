@@ -1,0 +1,39 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Sun, 27 Sep 2026 17:20:00 -0400
+Subject: [PATCH] vdec: program the slave's stream write pointer on no-parser SoCs
+
+On SoCs without a stream parser (S6) only the master of a dual-layer
+stream-mode pair wrote HEVC_STREAM_WR_PTR / VLD_MEM_VIFIFO_WP; the slave
+copied the master's wp into its own vbuf but left the register at the
+value of the master's last run. Once the buffer drains to an access-unit
+boundary the slave (Dolby Vision FEL enhancement layer) sees an empty
+fifo, returns AGAIN forever, the dual scheduler keeps picking it, and the
+master never runs again to refresh the register: decode stalls with the
+buffer full (measured: EL hw WR_PTR frozen at be4d0ec7, vbuf wp bf23ce04).
+---
+diff --git a/drivers/frame_provider/decoder/utils/vdec.c b/drivers/frame_provider/decoder/utils/vdec.c
+index 95deddf..59a76cd 100644
+--- a/drivers/frame_provider/decoder/utils/vdec.c
++++ b/drivers/frame_provider/decoder/utils/vdec.c
+@@ -2072,6 +2072,10 @@ static void vdec_sync_input_write(struct vdec_s *vdec)
+ 			} else {
+ 				STBUF_WRITE(&vdec->vbuf, set_wp,
+ 					STBUF_READ(&vdec->master->vbuf, get_wp));
++				/* the slave runs on the core too: without this it
++				 * decodes against the wp of the master's last run */
++				WRITE_VREG(VLD_MEM_VIFIFO_WP,
++					STBUF_READ(&vdec->vbuf, get_wp));
+ 			}
+ 		} else {
+ 			WRITE_VREG(VLD_MEM_VIFIFO_WP,
+@@ -2085,6 +2089,10 @@ static void vdec_sync_input_write(struct vdec_s *vdec)
+ 			} else {
+ 				STBUF_WRITE(&vdec->vbuf, set_wp,
+ 					STBUF_READ(&vdec->master->vbuf, get_wp));
++				/* the slave runs on the core too: without this it
++				 * decodes against the wp of the master's last run */
++				WRITE_VREG(HEVC_STREAM_WR_PTR,
++					STBUF_READ(&vdec->vbuf, get_wp));
+ 			}
+ 		} else {
+ 			WRITE_VREG(HEVC_STREAM_WR_PTR,
