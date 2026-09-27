@@ -1,0 +1,60 @@
+From 8df85e87511ed4070ea5268fd4f0b6848920525e Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 26 Sep 2026 19:44:52 -0500
+Subject: [PATCH] amstream: check in video pts at the written stream offset
+
+On SoCs without a stream parser the threadrw worker copies write()
+data into the stream buffer later, so vbuf->stream_offset lags what
+userspace has written. Video pts checked in meanwhile share that
+lagging offset, and pictures get the pts of other packets.
+---
+ drivers/stream_input/amports/amstream.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/stream_input/amports/amstream.c b/drivers/stream_input/amports/amstream.c
+index 34c4cd89e..bb92d1a83 100644
+--- a/drivers/stream_input/amports/amstream.c
++++ b/drivers/stream_input/amports/amstream.c
+@@ -1862,6 +1862,15 @@ static long amstream_ioctl_get(struct port_priv_s *priv, ulong arg)
+ 	return r;
+ 
+ }
++
++static u32 vbuf_checkin_offset(struct stream_buf_s *vbuf)
++{
++	/* stream_offset lags write() by the data still queued in threadrw */
++	if (vbuf->write_thread)
++		return threadrw_dataoffset(vbuf);
++	return vbuf->stream_offset;
++}
++
+ static long amstream_ioctl_set(struct port_priv_s *priv, ulong arg)
+ {
+ 	struct  stream_port_s *this = priv->port;
+@@ -2005,7 +2014,7 @@ static long amstream_ioctl_set(struct port_priv_s *priv, ulong arg)
+ 			struct stream_buf_s *vbuf = &priv->vdec->vbuf;
+ 			if (vbuf->no_parser) {
+ 				pts_checkin_offset(PTS_TYPE_VIDEO,
+-					vbuf->stream_offset, parm.data_32);
++					vbuf_checkin_offset(vbuf), parm.data_32);
+ 			} else {
+ 				r = es_vpts_checkin(vbuf, parm.data_32);
+ 			}
+@@ -2853,7 +2862,7 @@ static long amstream_do_ioctl_old(struct port_priv_s *priv,
+ 			struct stream_buf_s *vbuf = &priv->vdec->vbuf;
+ 			if (vbuf->no_parser) {
+ 				pts_checkin_offset(PTS_TYPE_VIDEO,
+-					vbuf->stream_offset, arg);
++					vbuf_checkin_offset(vbuf), arg);
+ 			} else {
+ 				r = es_vpts_checkin(vbuf, arg);
+ 			}
+@@ -2883,7 +2892,7 @@ static long amstream_do_ioctl_old(struct port_priv_s *priv,
+ 					struct stream_buf_s *vbuf = &priv->vdec->vbuf;
+ 					if (vbuf->no_parser && !vdec_single(priv->vdec)) {
+ 						pts_checkin_offset_us64(PTS_TYPE_VIDEO,
+-							vbuf->stream_offset, pts);
++							vbuf_checkin_offset(vbuf), pts);
+ 					} else {
+ 						r = es_vpts_checkin_us64(
+ 						&priv->vdec->vbuf, pts);
