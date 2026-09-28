@@ -22,18 +22,21 @@ the loader already loaded the class), init() reports the LOADED/NOT_LOADED
 resume() of a xlet never started by an application fail without acting,
 stop() reports from the shown state (destroying the initialised xlet, or,
 if the loader's init failed, stopping it as stock stops an uninitialised
-one), and start() and the xlet's own notifyPaused()/notifyDestroyed() act
-for real with the shown state as their from-state. The loader's init sends
-no state-change event. The mask ends when the xlet is moved on for real; a
-proxy kept from the previous title, or one an application command queued
-first has already moved on, is not masked.
+one), and start() acts for real with the shown state as its from-state.
+The xlet's own notifyPaused()/notifyDestroyed() while masked (e.g. from
+initXlet during the loader's init) are held and replayed right after the
+application's init/start - where stock would deliver them - or dropped if
+it is stopped first. The loader's init sends no state-change event. The
+mask is set on the proxy's command thread just before that init runs, so
+an application command queued ahead of it runs unmasked, as stock, and a
+proxy kept from the previous title (not NOT_LOADED) is left alone.
 
 Present since "Only autostart when requested" (2013); unchanged in
 libbluray 1.5.1 and master.
 
 --- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
 +++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
-@@ -60,9 +60,33 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -60,9 +60,27 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public int getState() {
@@ -53,12 +56,6 @@ libbluray 1.5.1 and master.
 +        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
 +        cmd.setLoaderInit();
 +        synchronized (cmds) {
-+            /* only a fresh proxy: one kept from the previous title keeps its
-+             * state, and the command below then fails without an event */
-+            if (state == NOT_LOADED && !masked) {
-+                shown = NOT_LOADED;
-+                masked = true;
-+            }
 +            cmds.addLast(cmd);
 +            cmds.notifyAll();
 +        }
@@ -67,7 +64,7 @@ libbluray 1.5.1 and master.
      public void load() {
          AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
          synchronized (cmds) {
-@@ -347,7 +371,23 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -347,7 +365,34 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              }
              if (cmd == null)
                  return;
@@ -76,13 +73,24 @@ libbluray 1.5.1 and master.
 +                /* the loader's early init: no event. A proxy that was not
 +                 * fresh (not masked), or that an application command queued
 +                 * ahead of this one has already moved on, is left alone. */
-+                if (masked) {
-+                    if (state == NOT_LOADED)
-+                        doInit();
-+                    else
-+                        masked = false;
++                /* The mask is set here, on the command thread, just before the
++                 * init: an application command queued ahead of it ran
++                 * unmasked, as stock, and a proxy kept from the previous
++                 * title (not NOT_LOADED) is left alone. */
++                if (!masked && state == NOT_LOADED) {
++                    shown = NOT_LOADED;
++                    masked = true;
++                    doInit();
 +                }
 +                cmd.release();
++                continue;
++            }
++            /* The xlet's own notifications while masked (e.g. notifyPaused()
++             * from initXlet during the loader's init) are held: stock would
++             * deliver them after the application's init/start ran initXlet. */
++            if (masked && (cmd.getCommand() == AppCommand.CMD_NOTIFY_PAUSED ||
++                           cmd.getCommand() == AppCommand.CMD_NOTIFY_DESTROYED)) {
++                heldNotify.addLast(cmd);
 +                continue;
 +            }
 +            maskedFrom = -1;
@@ -92,7 +100,7 @@ libbluray 1.5.1 and master.
              int toState;
              boolean ret;
              switch (cmd.getCommand()) {
-@@ -389,6 +429,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -389,16 +434,112 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              default:
                  return;
              }
@@ -102,7 +110,26 @@ libbluray 1.5.1 and master.
              notifyListeners(fromState, toState, !ret);
              cmd.release();
              if (state == DESTROYED)
-@@ -396,9 +439,76 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+                 state = NOT_LOADED;
++            endHeldNotify(cmd.getCommand() == AppCommand.CMD_START);
++        }
++    }
++
++    /* After the mask ends: replay the xlet's held notifications right after
++     * the init/start that ran initXlet in stock, or drop them when the xlet
++     * never got that far (a failed load, a stop). */
++    private void endHeldNotify(boolean replay) {
++        if (masked || heldNotify.isEmpty())
++            return;
++        if (replay) {
++            synchronized (cmds) {
++                while (!heldNotify.isEmpty())
++                    cmds.addFirst(heldNotify.removeLast());
++                cmds.notifyAll();
++            }
++        } else {
++            while (!heldNotify.isEmpty())
++                ((AppCommand)heldNotify.removeFirst()).release();
          }
      }
  
@@ -129,26 +156,34 @@ libbluray 1.5.1 and master.
 +                masked = false;             /* the load failed: INVALID */
 +                ret = false;
 +            }
-+            break;
++            notifyListeners(from, to, !ret);
++            cmd.release();
++            endHeldNotify(false);
++            return true;
 +        case AppCommand.CMD_INIT:
 +            /* done by the loader's init, or failed there as it would here */
 +            to = PAUSED;
 +            ret = (state == PAUSED);
 +            masked = false;
-+            break;
++            notifyListeners(from, to, !ret);
++            cmd.release();
++            endHeldNotify(true);
++            return true;
 +        case AppCommand.CMD_STOP:
 +            to = DESTROYED;
 +            if (state == PAUSED) {
 +                maskedFrom = from;          /* destroy the initialised xlet */
 +                return false;
 +            }
-+            masked = false;
 +            /* never initialised: stock stops a NOT_LOADED/LOADED xlet
 +             * without calling it */
 +            xlet = null;
 +            state = NOT_LOADED;
-+            ret = true;
-+            break;
++            masked = false;
++            notifyListeners(from, to, false);
++            cmd.release();
++            endHeldNotify(false);
++            return true;
 +        case AppCommand.CMD_PAUSE:
 +            to = PAUSED;                    /* never started: fails */
 +            ret = false;
@@ -158,8 +193,7 @@ libbluray 1.5.1 and master.
 +            ret = false;
 +            break;
 +        default:
-+            /* start and the xlet's own notifications act for real; the
-+             * mask stays on until they have */
++            /* start acts for real; the mask stays on until it has */
 +            maskedFrom = from;
 +            return false;
 +        }
@@ -172,15 +206,15 @@ libbluray 1.5.1 and master.
      private Xlet xlet;
 -    private int state;
 +    private volatile int state;
-+    /* the early-init mask: written by initPresent() under cmds (fresh proxy,
-+     * nothing queued before it) and afterwards only by the command thread */
++    /* the early-init mask: written only by the command thread */
 +    private volatile boolean masked = false;
 +    private volatile int shown = NOT_LOADED;
 +    private int maskedFrom = -1; /* command thread only */
++    private LinkedList heldNotify = new LinkedList(); /* command thread only */
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -464,8 +574,17 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -464,8 +605,17 @@ class BDJAppProxy implements DVBJProxy, Runnable {
          public static final int CMD_NOTIFY_DESTROYED = 6;
          public static final int CMD_NOTIFY_PAUSED = 7;
  
