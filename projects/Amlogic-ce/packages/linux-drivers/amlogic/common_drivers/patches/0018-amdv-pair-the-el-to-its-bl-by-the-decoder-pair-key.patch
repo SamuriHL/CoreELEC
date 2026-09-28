@@ -1,0 +1,222 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Sun, 27 Sep 2026 20:30:00 -0400
+Subject: [PATCH] amdv: pair the EL to its BL by the decoder's pair key
+
+With the decoder stamping one key on the BL and EL pictures of an
+access unit (media_modules 0003), amdv peeks the EL queue instead of
+taking its head: an EL whose key matches the BL is paired, ELs with an
+older key (their BL was already shown or never will be) are retired,
+and a BL whose EL has not arrived is shown alone while the EL waits for
+its own BL. Nothing is paired by position, so a late EL costs one
+BL-only frame and nothing else. If BL keys ever go backwards only exact
+matches pair. Unkeyed frames keep the old path, including 0013's
+realign, which is skipped for keyed frames. dvel_pair_mode=0 restores
+the old behaviour for A/B; a stats line is printed per session.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -2255,6 +2255,96 @@
+ 	return vf;
+ }
+ 
++/* Pair each BL with the EL of its own access unit by the decoder's pair key
++ * (vh265 dv_pair_stamp). The EL queue is only peeked: an EL is taken when its
++ * key matches this BL, or retired when strictly older (its BL was already
++ * shown or never will be). A BL whose EL is not there yet is shown alone and
++ * the EL is left for its own BL; nothing is ever paired by position.
++ */
++static uint dvel_pair_mode = 1;
++module_param(dvel_pair_mode, uint, 0664);
++MODULE_PARM_DESC(dvel_pair_mode, "\n pair BL/EL by decoder key, 0 = legacy\n");
++
++static u64 dvel_last_bl_key;
++static u32 dvel_st_paired, dvel_st_retired, dvel_st_newer, dvel_st_older;
++static u32 dvel_st_empty, dvel_st_unkeyed, dvel_st_regress;
++
++bool amdv_dvel_keyed(struct vframe_s *vf)
++{
++	return dvel_pair_mode && vf && vf->dv_pair_key;
++}
++EXPORT_SYMBOL(amdv_dvel_keyed);
++
++static void dvel_retire_older(u64 bk)
++{
++	struct vframe_s *el;
++	int n;
++
++	for (n = 0; n < 16; n++) {
++		el = dvel_vf_peek();
++		if (!el || !el->dv_pair_key || el->dv_pair_key >= bk)
++			break;
++		el = dvel_vf_get();
++		if (!el)
++			break;
++		if (debug_dolby & 2)
++			pr_dv_dbg("retire el(%p-%llx) for bl %llx\n",
++				  el, el->dv_pair_key, bk);
++		dvel_vf_put(el);
++		dvel_st_retired++;
++	}
++}
++
++static struct vframe_s *dvel_get_pair_for_bl(struct vframe_s *bl)
++{
++	u64 bk = bl->dv_pair_key;
++	struct vframe_s *el;
++
++	if (!amdv_dvel_keyed(bl))
++		return dvel_vf_get();
++	/* keys follow display order; if the BL went back, pair exact only */
++	if (bk < dvel_last_bl_key) {
++		dvel_st_regress++;
++		pr_info_ratelimited("dvel: bl key %llx after %llx - no retiring\n",
++				    bk, dvel_last_bl_key);
++	} else {
++		dvel_retire_older(bk);
++	}
++	dvel_last_bl_key = bk;
++	el = dvel_vf_peek();
++	if (el && el->dv_pair_key == bk) {
++		dvel_st_paired++;
++		return dvel_vf_get();
++	}
++	if (!el)
++		dvel_st_empty++;
++	else if (!el->dv_pair_key)
++		dvel_st_unkeyed++;
++	else if (el->dv_pair_key > bk)
++		dvel_st_newer++;
++	else
++		dvel_st_older++;
++	return NULL;
++}
++
++static void dvel_pair_stats_flush(void)
++{
++	if (dvel_st_paired || dvel_st_retired || dvel_st_newer ||
++	    dvel_st_older || dvel_st_empty || dvel_st_unkeyed || dvel_st_regress)
++		pr_info("dvel pairing: paired %u retired %u el-newer %u el-older %u empty %u unkeyed %u bl-regress %u\n",
++			dvel_st_paired, dvel_st_retired, dvel_st_newer,
++			dvel_st_older, dvel_st_empty, dvel_st_unkeyed,
++			dvel_st_regress);
++	dvel_st_paired = 0;
++	dvel_st_retired = 0;
++	dvel_st_newer = 0;
++	dvel_st_older = 0;
++	dvel_st_empty = 0;
++	dvel_st_unkeyed = 0;
++	dvel_st_regress = 0;
++	dvel_last_bl_key = 0;
++}
++
+ static struct vframe_s *dv_vf[16][2];
+ static void *metadata_parser;
+ static bool metadata_parser_reset_flag;
+@@ -2697,6 +2787,7 @@
+ 
+ void dv_inst_unmap(int inst)
+ {
++	dvel_pair_stats_flush();
+ 	if (!multi_dv_mode)
+ 		return;
+ 
+@@ -8414,14 +8505,15 @@
+ 		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
+ 		if (req.dv_enhance_exist && toggle_mode == 1 &&
+ 		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
+-			el_vf = dvel_vf_get();
++			el_vf = dvel_get_pair_for_bl(vf);
+ 			if (el_vf && (el_vf->pts_us64 == vf->pts_us64 ||
+ 				      !(dolby_vision_flags &
+ 				      FLAG_CHECK_ES_PTS))) {
+ 				if (debug_dolby & 2)
+-					pr_dv_dbg("+++ get bl(%p-%lld) with el(%p-%lld) +++\n",
++					pr_dv_dbg("+++ get bl(%p-%lld) with el(%p-%lld) key %llx/%llx +++\n",
+ 						vf, vf->pts_us64,
+-						el_vf, el_vf->pts_us64);
++						el_vf, el_vf->pts_us64,
++						vf->dv_pair_key, el_vf->dv_pair_key);
+ 				if (meta_flag_bl) {
+ 					int el_md_size = 0;
+ 					int el_comp_size = 0;
+@@ -8489,6 +8581,10 @@
+ 			if (debug_dolby & 2)
+ 				pr_dv_dbg("+++ get bl(%p-%lld) +++\n",
+ 					     vf, vf->pts_us64);
++			/* no EL for this picture: still drop ELs left behind */
++			if (dvel_provider && !strcmp(dvel_provider, "dveldec") &&
++			    amdv_dvel_keyed(vf))
++				dvel_retire_older(vf->dv_pair_key);
+ 			amdvdolby_vision_vf_add(vf, NULL);
+ 		}
+ 
+@@ -10062,13 +10158,14 @@
+ 		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
+ 		if (req.dv_enhance_exist && toggle_mode == 1 &&
+ 		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
+-			el_vf = dvel_vf_get();
++			el_vf = dvel_get_pair_for_bl(vf);
+ 			if (el_vf &&  (el_vf->pts_us64 == vf->pts_us64 ||
+ 			    !(dolby_vision_flags & FLAG_CHECK_ES_PTS))) {
+ 				if (debug_dolby & 2)
+-					pr_dv_dbg("+++ get bl(%p-%lld) with el(%p-%lld) +++\n",
++					pr_dv_dbg("+++ get bl(%p-%lld) with el(%p-%lld) key %llx/%llx +++\n",
+ 						vf, vf->pts_us64,
+-						el_vf, el_vf->pts_us64);
++						el_vf, el_vf->pts_us64,
++						vf->dv_pair_key, el_vf->dv_pair_key);
+ 				if (meta_flag_bl) {
+ 					int el_md_size = 0;
+ 					int el_comp_size = 0;
+@@ -10134,6 +10231,10 @@
+ 			if (debug_dolby & 2)
+ 				pr_dv_dbg("+++ get bl(%p-%lld) +++\n",
+ 					     vf, vf->pts_us64);
++			/* no EL for this picture: still drop ELs left behind */
++			if (dvel_provider && !strcmp(dvel_provider, "dveldec") &&
++			    amdv_dvel_keyed(vf))
++				dvel_retire_older(vf->dv_pair_key);
+ 			amdvdolby_vision_vf_add(vf, NULL);
+ 		}
+ 
+diff -ruN a/drivers/media/video_sink/video.c b/drivers/media/video_sink/video.c
+--- a/drivers/media/video_sink/video.c
++++ b/drivers/media/video_sink/video.c
+@@ -968,6 +968,9 @@
+ 
+ 	if (!vf || !is_amdv_enable())
+ 		return;
++	/* amdv pairs keyed frames by the decoder's key instead */
++	if (amdv_dvel_keyed(vf))
++		return;
+ 
+ 	fmt = get_vframe_src_fmt(vf);
+ 	if (fmt != VFRAME_SIGNAL_FMT_DOVI &&
+diff -ruN a/include/linux/amlogic/media/amdolbyvision/dolby_vision.h b/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
+--- a/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
++++ b/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
+@@ -155,6 +155,7 @@
+ 
+ void enable_amdv(int enable);
+ bool is_amdv_enable(void);
++bool amdv_dvel_keyed(struct vframe_s *vf);
+ bool is_amdv_on(void);
+ bool is_amdv_video_on(void);
+ bool is_amdv_graphic_on(void);
+diff -ruN a/include/linux/amlogic/media/vfm/vframe.h b/include/linux/amlogic/media/vfm/vframe.h
+--- a/include/linux/amlogic/media/vfm/vframe.h
++++ b/include/linux/amlogic/media/vfm/vframe.h
+@@ -855,6 +855,10 @@
+ 	enum dec_set_screen_mode_t dec_set_screen_mode;
+ 	enum dec_fence_status_t dec_fence_status;
+ 	struct vf_lcevc_t scaler_coeff;
++	/* Dolby Vision dual layer: equal on the BL and EL frames of one access
++	 * unit and ordered like the BL display order; 0 = not keyed
++	 */
++	u64 dv_pair_key;
+ } /*vframe_t */;
+ 
+ #define VC_FLAG_AI_SR		0x1

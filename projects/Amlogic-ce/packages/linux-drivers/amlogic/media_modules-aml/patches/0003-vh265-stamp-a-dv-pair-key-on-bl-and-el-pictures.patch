@@ -1,0 +1,186 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Sun, 27 Sep 2026 20:30:00 -0400
+Subject: [PATCH] vh265: stamp a Dolby Vision pair key on BL and EL pictures
+
+amdv pairs the dual-layer base and enhancement pictures by queue
+position, so one late EL leaves the pairing a frame off; our
+common_drivers 0013 then repairs it from put counts one vsync late,
+costing a BL-only frame, a mispaired frame and a correct EL per miss.
+The EL vframe has no usable identity (its pts is forced to 0).
+
+The BL now stamps each picture with (epoch, POC) - the epoch changes at
+every POC restart, so keys follow the BL display order - and hands the
+key of the picture it built in the access unit to the EL at the BL->EL
+switch. The EL copies it onto its own picture; a retry of the same EL
+picture keeps its claim, and an access unit in which the BL built no
+picture hands over an orphan key so the EL can never take the previous
+picture's. The key reaches amdv in the new vframe_s dv_pair_key.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+diff -ruN a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -1447,6 +1447,10 @@
+ 	dos_addr_t header_adr;
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 	unsigned char dv_enhance_exist;
++	/* same value on the BL and EL pictures of one access unit, see
++	 * dv_pair_stamp(); ordered like the BL display order
++	 */
++	u64 dv_pair_key;
+ #endif
+ 	char *aux_data_buf;
+ 	int aux_data_size;
+@@ -1664,6 +1668,17 @@
+ 	unsigned int decode_timeout_count;
+ 	unsigned int timeout_num;
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++	/* BL: key epoch (0 = start a new one) and the largest POC in it */
++	u32 dv_pair_epoch;
++	int dv_pair_epoch_max_poc;
++	/* BL: a picture was created since the last access-unit handoff */
++	unsigned char dv_pair_pic_this_au;
++	/* BL: key handed to the EL at each BL->EL switch, and its sequence */
++	u32 dv_pair_handoff_seq;
++	u64 dv_pair_handoff_key;
++	/* EL: the handoff it claimed and the key its pictures carry */
++	u32 dv_pair_claim_seq;
++	u64 dv_pair_src_key;
+ 	unsigned char switch_dvlayer_flag;
+ 	unsigned char no_switch_dvlayer_count;
+ 	unsigned char bypass_dvenl_enable;
+@@ -2762,6 +2777,9 @@
+ 	hevc->list_no = 0;
+ 
+ 	hevc->m_pocRandomAccess = MAX_INT;
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++	hevc->dv_pair_epoch = 0;
++#endif
+ 	hevc->tile_enabled = 0;
+ 	hevc->tile_x = 0;
+ 	hevc->tile_y = 0;
+@@ -2834,6 +2852,46 @@
+ 
+ static int post_picture_early(struct vdec_s *vdec, int index);
+ static int prepare_display_buf(struct vdec_s *vdec, struct PIC_s *pic);
++
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++/* Dolby Vision dual layer: amdv pairs each BL picture with the EL picture of
++ * the same access unit by this key, peeking the EL queue without taking from
++ * it. The BL stamps (epoch, POC); the epoch changes at every POC restart so
++ * keys follow the BL display order. The EL copies the key the BL handed over
++ * for the access unit it is decoding.
++ */
++#define DV_PAIR_ORPHAN 1ULL
++static atomic_t dv_pair_epoch_seq = ATOMIC_INIT(0);
++
++static u64 dv_pair_stamp(struct hevc_state_s *hevc, struct vdec_s *vdec)
++{
++	int nal = hevc->m_nalUnitType;
++
++	if (vdec->slave) {
++		bool idr_bla = nal == NAL_UNIT_CODED_SLICE_IDR ||
++			nal == NAL_UNIT_CODED_SLICE_IDR_N_LP ||
++			nal == NAL_UNIT_CODED_SLICE_BLA ||
++			nal == NAL_UNIT_CODED_SLICE_BLANT ||
++			nal == NAL_UNIT_CODED_SLICE_BLA_N_LP;
++		bool irap = nal >= NAL_UNIT_CODED_SLICE_BLA &&
++			nal <= NAL_UNIT_CODED_SLICE_CRA;
++
++		if (hevc->dv_pair_epoch == 0 || idr_bla ||
++		    (irap && hevc->curr_POC <= hevc->dv_pair_epoch_max_poc)) {
++			hevc->dv_pair_epoch = atomic_inc_return(&dv_pair_epoch_seq);
++			hevc->dv_pair_epoch_max_poc = hevc->curr_POC;
++		} else if (hevc->curr_POC > hevc->dv_pair_epoch_max_poc) {
++			hevc->dv_pair_epoch_max_poc = hevc->curr_POC;
++		}
++		hevc->dv_pair_pic_this_au = 1;
++		return ((u64)hevc->dv_pair_epoch << 32) |
++			((u32)hevc->curr_POC ^ 0x80000000u);
++	}
++	if (vdec->master)
++		return hevc->dv_pair_src_key;
++	return 0;
++}
++#endif
+ static int H265_alloc_mmu(struct hevc_state_s *hevc,
+ 			struct PIC_s *new_pic,	unsigned short bit_depth,
+ 			unsigned int *mmu_index_adr);
+@@ -7819,6 +7877,14 @@
+ 						"To decode el (poc %d) => set bl (poc %d) dv_enhance_exist flag\n",
+ 						hevc->curr_POC, hevc_ba->cur_pic->POC);
+ 				}
++				/* a retry of the same EL picture keeps its claim */
++				if (hevc->dv_pair_claim_seq !=
++				    hevc_ba->dv_pair_handoff_seq) {
++					hevc->dv_pair_claim_seq =
++						hevc_ba->dv_pair_handoff_seq;
++					hevc->dv_pair_src_key =
++						hevc_ba->dv_pair_handoff_key;
++				}
+ 			}
+ 			if (vdec->master == NULL &&
+ 				vdec->slave == NULL)
+@@ -7859,6 +7925,7 @@
+ #endif
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 			hevc->cur_pic->dv_enhance_exist = 0;
++			hevc->cur_pic->dv_pair_key = dv_pair_stamp(hevc, vdec);
+ 			if (vdec->slave)
+ 				hevc_print(hevc, H265_DEBUG_DV,
+ 				"Clear bl (poc %d) dv_enhance_exist flag\n",
+@@ -7916,6 +7983,7 @@
+ 
+ #ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+ 			hevc->cur_pic->dv_enhance_exist = 0;
++			hevc->cur_pic->dv_pair_key = dv_pair_stamp(hevc, vdec);
+ 			if (vdec->master == NULL &&
+ 				vdec->slave == NULL)
+ 				set_aux_data(hevc, hevc->cur_pic, 0, 0);
+@@ -10428,6 +10496,11 @@
+ 		}
+ 		vf->dec_set_screen_mode = vdec->screen_mode;
+ 		vf->src_fmt.play_id = vdec->inst_cnt;
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++		vf->dv_pair_key = pic->dv_pair_key;
++#else
++		vf->dv_pair_key = 0;
++#endif
+ 		vf->width = vf->width /
+ 			get_double_write_ratio(pic->double_write_mode & 0xf);
+ 		vf->height = vf->height /
+@@ -11799,6 +11872,14 @@
+ 				hevc->switch_dvlayer_flag = 1;
+ 				hevc->no_switch_dvlayer_count = 0;
+ 				hevc_el->start_parser_type = next_parser_type;
++				/* no BL picture in this access unit: the EL
++				 * must not take the previous picture's key
++				 */
++				hevc->dv_pair_handoff_key =
++					(hevc->dv_pair_pic_this_au && hevc->cur_pic) ?
++					hevc->cur_pic->dv_pair_key : DV_PAIR_ORPHAN;
++				hevc->dv_pair_handoff_seq++;
++				hevc->dv_pair_pic_this_au = 0;
+ 				if (hevc->cur_pic)
+ 					hevc_print(hevc, H265_DEBUG_DV,
+ 						"switch (poc %d) to el\n",
+@@ -11823,6 +11904,8 @@
+ 				hevc->switch_dvlayer_flag = 0;
+ 				hevc->start_parser_type =
+ 					next_parser_type;
++				if (vdec->slave)
++					hevc->dv_pair_pic_this_au = 0;
+ 				hevc->no_switch_dvlayer_count++;
+ 				hevc_print(hevc, H265_DEBUG_DV,
+ 					"%s: no_switch_dvlayer_count = %d\n",
+@@ -11934,6 +12017,9 @@
+ 			hevc->curr_POC = INVALID_POC;
+ 			/* add to fix RAP_B_Bossen_1 */
+ 			hevc->m_pocRandomAccess = MAX_INT;
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++			hevc->dv_pair_epoch = 0;
++#endif
+ 			flush_output(hevc, pic);
+ 			clear_poc_flag(hevc);
+ 			if (input_frame_based(vdec)) {
