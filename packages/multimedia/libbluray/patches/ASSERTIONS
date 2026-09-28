@@ -69,7 +69,11 @@ src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = (state == PAUSED);:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean masked = false;:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private boolean loaderInit = false;:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:heldNotify.addLast(cmd);:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private void endHeldNotify(boolean replay) {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private void endHeldNotify(boolean replay, int at) {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:return masked ? shown : s;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:tagMaskEpoch(cmd);:2
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:cmd.getMaskEpoch() == droppedEpoch:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:replayAt = cmds.size();:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!masked && state == NOT_LOADED) {:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:maskedFrom = from;:2
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = false;                /* stock: already loaded */:1

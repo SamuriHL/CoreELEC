@@ -24,9 +24,11 @@ stop() reports from the shown state (destroying the initialised xlet, or,
 if the loader's init failed, stopping it as stock stops an uninitialised
 one), and start() acts for real with the shown state as its from-state.
 The xlet's own notifyPaused()/notifyDestroyed() while masked (e.g. from
-initXlet during the loader's init) are held and replayed right after the
-application's init/start - where stock would deliver them - or dropped if
-it is stopped first. The loader's init sends no state-change event. The
+initXlet during the loader's init) are held and replayed where stock
+would have queued them - behind what was queued when the application's
+init/start ran - or dropped, together with any the xlet sends during a
+masked stop, if it is stopped first. While a masked start runs, getState()
+still reads the shown state. The loader's init sends no state-change event. The
 mask is set on the proxy's command thread just before that init runs, so
 an application command queued ahead of it runs unmasked, as stock, and a
 proxy kept from the previous title (not NOT_LOADED) is left alone.
@@ -36,10 +38,11 @@ libbluray 1.5.1 and master.
 
 --- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
 +++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
-@@ -60,9 +60,27 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -60,7 +60,27 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public int getState() {
+-        return state;
 +        /* A PRESENT xlet that only the loader has initialised (initPresent())
 +         * is still NOT_LOADED to the disc: a player loads it only when an
 +         * application asks. BD+ Handshake xlets (Turbo 3D) start the disc's
@@ -48,9 +51,11 @@ libbluray 1.5.1 and master.
 +         * produced, as if the early init had not happened. */
 +        if (masked)
 +            return shown;
-         return state;
-     }
- 
++        int s = state;
++        /* the command thread may have masked (and started loading) since */
++        return masked ? shown : s;
++    }
++
 +    /* loader only: initialise a PRESENT xlet ahead of its start, invisibly */
 +    protected void initPresent() {
 +        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
@@ -59,12 +64,26 @@ libbluray 1.5.1 and master.
 +            cmds.addLast(cmd);
 +            cmds.notifyAll();
 +        }
-+    }
-+
+     }
+ 
      public void load() {
-         AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
+@@ -126,6 +146,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+ 
+     protected void notifyDestroyed() {
+         AppCommand cmd = new AppCommand(AppCommand.CMD_NOTIFY_DESTROYED, null);
++        tagMaskEpoch(cmd);
          synchronized (cmds) {
-@@ -347,7 +365,34 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+             cmds.addLast(cmd);
+             cmds.notifyAll();
+@@ -134,6 +155,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+ 
+     protected void notifyPaused() {
+         AppCommand cmd = new AppCommand(AppCommand.CMD_NOTIFY_PAUSED, null);
++        tagMaskEpoch(cmd);
+         synchronized (cmds) {
+             cmds.addLast(cmd);
+             cmds.notifyAll();
+@@ -347,9 +369,54 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              }
              if (cmd == null)
                  return;
@@ -79,6 +98,7 @@ libbluray 1.5.1 and master.
 +                 * title (not NOT_LOADED) is left alone. */
 +                if (!masked && state == NOT_LOADED) {
 +                    shown = NOT_LOADED;
++                    maskEpoch++;            /* before masked: see tagMaskEpoch() */
 +                    masked = true;
 +                    doInit();
 +                }
@@ -88,10 +108,19 @@ libbluray 1.5.1 and master.
 +            /* The xlet's own notifications while masked (e.g. notifyPaused()
 +             * from initXlet during the loader's init) are held: stock would
 +             * deliver them after the application's init/start ran initXlet. */
-+            if (masked && (cmd.getCommand() == AppCommand.CMD_NOTIFY_PAUSED ||
-+                           cmd.getCommand() == AppCommand.CMD_NOTIFY_DESTROYED)) {
-+                heldNotify.addLast(cmd);
-+                continue;
++            if (cmd.getCommand() == AppCommand.CMD_NOTIFY_PAUSED ||
++                cmd.getCommand() == AppCommand.CMD_NOTIFY_DESTROYED) {
++                if (masked) {
++                    heldNotify.addLast(cmd);
++                    continue;
++                }
++                /* sent while a mask was on that ended with the xlet stopped
++                 * (e.g. from destroyXlet in a masked stop): stock never ran
++                 * the xlet, so there is nothing to notify */
++                if (cmd.getMaskEpoch() >= 0 && cmd.getMaskEpoch() == droppedEpoch) {
++                    cmd.release();
++                    continue;
++                }
 +            }
 +            maskedFrom = -1;
 +            if (masked && runMasked(cmd))
@@ -99,8 +128,18 @@ libbluray 1.5.1 and master.
 +            int fromState = (maskedFrom >= 0) ? maskedFrom : state;
              int toState;
              boolean ret;
++            /* where stock would have queued a notification initXlet sends
++             * during this start: behind what is already queued now */
++            int replayAt = -1;
++            if (maskedFrom >= 0 && cmd.getCommand() == AppCommand.CMD_START) {
++                synchronized (cmds) {
++                    replayAt = cmds.size();
++                }
++            }
              switch (cmd.getCommand()) {
-@@ -389,16 +434,112 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+             case AppCommand.CMD_LOAD:
+                 toState = LOADED;
+@@ -389,16 +456,129 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              default:
                  return;
              }
@@ -111,28 +150,43 @@ libbluray 1.5.1 and master.
              cmd.release();
              if (state == DESTROYED)
                  state = NOT_LOADED;
-+            endHeldNotify(cmd.getCommand() == AppCommand.CMD_START);
-+        }
++            if (maskedFrom >= 0)
++                endHeldNotify(cmd.getCommand() == AppCommand.CMD_START, replayAt);
+         }
+     }
+ 
++    /* notifications record the mask they were sent under */
++    private void tagMaskEpoch(AppCommand cmd) {
++        boolean m = masked;             /* masked first: maskEpoch is bumped before it */
++        cmd.setMaskEpoch(m ? maskEpoch : -1);
 +    }
 +
 +    /* After the mask ends: replay the xlet's held notifications right after
 +     * the init/start that ran initXlet in stock, or drop them when the xlet
 +     * never got that far (a failed load, a stop). */
-+    private void endHeldNotify(boolean replay) {
-+        if (masked || heldNotify.isEmpty())
++    private void endHeldNotify(boolean replay, int at) {
++        if (masked)
 +            return;
-+        if (replay) {
-+            synchronized (cmds) {
-+                while (!heldNotify.isEmpty())
-+                    cmds.addFirst(heldNotify.removeLast());
-+                cmds.notifyAll();
-+            }
-+        } else {
++        if (!replay) {
++            droppedEpoch = maskEpoch;
 +            while (!heldNotify.isEmpty())
 +                ((AppCommand)heldNotify.removeFirst()).release();
-         }
-     }
- 
++            return;
++        }
++        if (heldNotify.isEmpty())
++            return;
++        synchronized (cmds) {
++            for (int i = 0; !heldNotify.isEmpty(); i++) {
++                Object c = heldNotify.removeFirst();
++                if (at < 0 || at + i > cmds.size())
++                    cmds.addLast(c);
++                else
++                    cmds.add(at + i, c);
++            }
++            cmds.notifyAll();
++        }
++    }
++
 +    /* A command on a masked xlet, answered from the state applications were
 +     * shown with stock semantics (see the do*() methods): the loader's init
 +     * already did the work a load or init would. Commands that move the xlet
@@ -158,7 +212,7 @@ libbluray 1.5.1 and master.
 +            }
 +            notifyListeners(from, to, !ret);
 +            cmd.release();
-+            endHeldNotify(false);
++            endHeldNotify(false, -1);
 +            return true;
 +        case AppCommand.CMD_INIT:
 +            /* done by the loader's init, or failed there as it would here */
@@ -167,7 +221,7 @@ libbluray 1.5.1 and master.
 +            masked = false;
 +            notifyListeners(from, to, !ret);
 +            cmd.release();
-+            endHeldNotify(true);
++            endHeldNotify(true, -1);    /* stock: behind what is queued */
 +            return true;
 +        case AppCommand.CMD_STOP:
 +            to = DESTROYED;
@@ -182,7 +236,7 @@ libbluray 1.5.1 and master.
 +            masked = false;
 +            notifyListeners(from, to, false);
 +            cmd.release();
-+            endHeldNotify(false);
++            endHeldNotify(false, -1);
 +            return true;
 +        case AppCommand.CMD_PAUSE:
 +            to = PAUSED;                    /* never started: fails */
@@ -211,10 +265,12 @@ libbluray 1.5.1 and master.
 +    private volatile int shown = NOT_LOADED;
 +    private int maskedFrom = -1; /* command thread only */
 +    private LinkedList heldNotify = new LinkedList(); /* command thread only */
++    private volatile int maskEpoch = 0; /* written by the command thread */
++    private int droppedEpoch = -1; /* command thread only */
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -464,8 +605,17 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -464,8 +644,26 @@ class BDJAppProxy implements DVBJProxy, Runnable {
          public static final int CMD_NOTIFY_DESTROYED = 6;
          public static final int CMD_NOTIFY_PAUSED = 7;
  
@@ -226,10 +282,19 @@ libbluray 1.5.1 and master.
 +            return loaderInit;
 +        }
 +
++        public void setMaskEpoch(int epoch) {
++            maskEpoch = epoch;
++        }
++
++        public int getMaskEpoch() {
++            return maskEpoch;
++        }
++
          private int cmd;
          private Object arg;
          private boolean done = false;
 +        private boolean loaderInit = false;
++        private int maskEpoch = -1;
      }
  }
 --- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
