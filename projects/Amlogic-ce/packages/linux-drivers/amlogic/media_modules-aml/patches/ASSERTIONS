@@ -17,4 +17,3 @@ drivers/frame_provider/decoder/h265/vh265.c:static atomic_t dv_pair_epoch_seq = 
 drivers/frame_provider/decoder/h265/vh265.c:hevc->cur_pic->dv_pair_key = dv_pair_stamp(hevc, vdec);:2
 drivers/frame_provider/decoder/h265/vh265.c:hevc->dv_pair_handoff_seq++;:1
 drivers/frame_provider/decoder/h265/vh265.c:vf->dv_pair_key = pic->dv_pair_key;:1
-drivers/frame_provider/decoder/h265/vh265.c:hevc->dv_pair_pic_this_au = 0;:3

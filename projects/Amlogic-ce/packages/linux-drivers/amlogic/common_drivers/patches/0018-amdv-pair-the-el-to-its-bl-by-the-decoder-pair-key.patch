@@ -18,7 +18,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c
 +++ b/drivers/media/enhancement/amdolby_vision/amdv.c
-@@ -2255,6 +2255,103 @@
+@@ -2255,6 +2255,96 @@
  	return vf;
  }
  
@@ -49,8 +49,7 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
 +
 +	for (n = 0; n < 16; n++) {
 +		el = dvel_vf_peek();
-+		/* an unkeyed EL is never paired with a keyed BL: drop it */
-+		if (!el || (el->dv_pair_key && el->dv_pair_key >= bk))
++		if (!el || !el->dv_pair_key || el->dv_pair_key >= bk)
 +			break;
 +		el = dvel_vf_get();
 +		if (!el)
@@ -58,25 +57,9 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
 +		if (debug_dolby & 2)
 +			pr_dv_dbg("retire el(%p-%llx) for bl %llx\n",
 +				  el, el->dv_pair_key, bk);
-+		if (el->dv_pair_key)
-+			dvel_st_retired++;
-+		else
-+			dvel_st_unkeyed++;
 +		dvel_vf_put(el);
++		dvel_st_retired++;
 +	}
-+}
-+
-+/* keys follow display order; if the BL went back, retire nothing */
-+static void dvel_note_bl(u64 bk)
-+{
-+	if (bk < dvel_last_bl_key) {
-+		dvel_st_regress++;
-+		pr_info_ratelimited("dvel: bl key %llx after %llx - no retiring\n",
-+				    bk, dvel_last_bl_key);
-+	} else {
-+		dvel_retire_older(bk);
-+	}
-+	dvel_last_bl_key = bk;
 +}
 +
 +static struct vframe_s *dvel_get_pair_for_bl(struct vframe_s *bl)
@@ -86,7 +69,15 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
 +
 +	if (!amdv_dvel_keyed(bl))
 +		return dvel_vf_get();
-+	dvel_note_bl(bk);
++	/* keys follow display order; if the BL went back, pair exact only */
++	if (bk < dvel_last_bl_key) {
++		dvel_st_regress++;
++		pr_info_ratelimited("dvel: bl key %llx after %llx - no retiring\n",
++				    bk, dvel_last_bl_key);
++	} else {
++		dvel_retire_older(bk);
++	}
++	dvel_last_bl_key = bk;
 +	el = dvel_vf_peek();
 +	if (el && el->dv_pair_key == bk) {
 +		dvel_st_paired++;
@@ -94,6 +85,8 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
 +	}
 +	if (!el)
 +		dvel_st_empty++;
++	else if (!el->dv_pair_key)
++		dvel_st_unkeyed++;
 +	else if (el->dv_pair_key > bk)
 +		dvel_st_newer++;
 +	else
@@ -122,15 +115,7 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
  static struct vframe_s *dv_vf[16][2];
  static void *metadata_parser;
  static bool metadata_parser_reset_flag;
-@@ -2266,6 +2363,7 @@
- 	struct vframe_s *el_put[16];
- 	int el_num = 0;
- 
-+	dvel_pair_stats_flush();
- 	spin_lock_irqsave(&amdv_lock, flags);
- 	if (vfm_path_on) {
- 		if (multi_dv_mode) {
-@@ -2697,6 +2795,7 @@
+@@ -2697,6 +2787,7 @@
  
  void dv_inst_unmap(int inst)
  {
@@ -138,7 +123,7 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
  	if (!multi_dv_mode)
  		return;
  
-@@ -8414,14 +8513,15 @@
+@@ -8414,14 +8505,15 @@
  		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
  		if (req.dv_enhance_exist && toggle_mode == 1 &&
  		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
@@ -157,18 +142,18 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
  				if (meta_flag_bl) {
  					int el_md_size = 0;
  					int el_comp_size = 0;
-@@ -8489,6 +8589,10 @@
+@@ -8489,6 +8581,10 @@
  			if (debug_dolby & 2)
  				pr_dv_dbg("+++ get bl(%p-%lld) +++\n",
  					     vf, vf->pts_us64);
 +			/* no EL for this picture: still drop ELs left behind */
 +			if (dvel_provider && !strcmp(dvel_provider, "dveldec") &&
 +			    amdv_dvel_keyed(vf))
-+				dvel_note_bl(vf->dv_pair_key);
++				dvel_retire_older(vf->dv_pair_key);
  			amdvdolby_vision_vf_add(vf, NULL);
  		}
  
-@@ -10062,13 +10166,14 @@
+@@ -10062,13 +10158,14 @@
  		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
  		if (req.dv_enhance_exist && toggle_mode == 1 &&
  		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
@@ -186,14 +171,14 @@ diff -ruN a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enha
  				if (meta_flag_bl) {
  					int el_md_size = 0;
  					int el_comp_size = 0;
-@@ -10134,6 +10239,10 @@
+@@ -10134,6 +10231,10 @@
  			if (debug_dolby & 2)
  				pr_dv_dbg("+++ get bl(%p-%lld) +++\n",
  					     vf, vf->pts_us64);
 +			/* no EL for this picture: still drop ELs left behind */
 +			if (dvel_provider && !strcmp(dvel_provider, "dveldec") &&
 +			    amdv_dvel_keyed(vf))
-+				dvel_note_bl(vf->dv_pair_key);
++				dvel_retire_older(vf->dv_pair_key);
  			amdvdolby_vision_vf_add(vf, NULL);
  		}
  

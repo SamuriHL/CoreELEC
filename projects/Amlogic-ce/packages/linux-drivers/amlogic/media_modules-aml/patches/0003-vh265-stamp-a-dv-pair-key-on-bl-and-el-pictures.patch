@@ -184,15 +184,3 @@ diff -ruN a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider
  			flush_output(hevc, pic);
  			clear_poc_flag(hevc);
  			if (input_frame_based(vdec)) {
-@@ -15249,6 +15335,11 @@
- 	hevc->vdec_cb_arg = arg;
- 	hevc->vdec_cb = callback;
- 	hevc->aux_data_dirty = 1;
-+#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
-+	/* every BL run starts an access unit (or retries it from its start) */
-+	if (vdec->slave)
-+		hevc->dv_pair_pic_this_au = 0;
-+#endif
- 
- 	if (i_only_flag)
- 		hevc->i_only = i_only_flag & 0xff;
