@@ -90,33 +90,37 @@ parameter re-runs the csc process on the next frame, like hdr_policy.
  	enum hdr_process_sel hdr_process_select, enum vpp_index_e vpp_index);
 --- a/drivers/media/enhancement/amvecm/amcsc.c
 +++ b/drivers/media/enhancement/amvecm/amcsc.c
-@@ -541,6 +541,7 @@
+@@ -541,6 +541,10 @@
  static uint primary_policy;
  #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
  static uint cur_primary_policy;
 +static uint cur_osd_pq_passthrough;
++/* osd_pq_passthrough as sampled for this update: compared and stored from one
++ * read, so a change written between them is seen again next time */
++static uint osd_pq_pass_sampled;
  #endif
  module_param(primary_policy, uint, 0664);
  MODULE_PARM_DESC(primary_policy, "\n current primary_policy\n");
-@@ -8873,6 +8874,13 @@
+@@ -8873,6 +8877,14 @@
  			signal_change_flag |= SIG_HDR_MODE;
  		}
  
-+		if (osd_pq_passthrough != cur_osd_pq_passthrough) {
++		osd_pq_pass_sampled = READ_ONCE(osd_pq_passthrough);
++		if (osd_pq_pass_sampled != cur_osd_pq_passthrough) {
 +			pr_csc(4, "osd pq passthrough changed from %d to %d.\n",
 +			       cur_osd_pq_passthrough,
-+			       osd_pq_passthrough);
++			       osd_pq_pass_sampled);
 +			signal_change_flag |= SIG_HDR_MODE;
 +		}
 +
  		if (get_primary_policy() != cur_primary_policy) {
  			pr_csc(4, "primary policy changed from %d to %d.\n",
  			       cur_primary_policy,
-@@ -9046,6 +9054,7 @@
+@@ -9046,6 +9058,7 @@
  #endif
  		cur_hdr_policy = get_hdr_policy();
  		cur_primary_policy = get_primary_policy();
-+		cur_osd_pq_passthrough = osd_pq_passthrough;
++		cur_osd_pq_passthrough = osd_pq_pass_sampled;
  	}
  
  	if (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A) &&
