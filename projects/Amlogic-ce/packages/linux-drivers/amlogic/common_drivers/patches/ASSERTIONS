@@ -135,3 +135,6 @@ drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_m
 drivers/media/enhancement/amdolby_vision/amdv.c:old_amdv_graphic_follow_video =:1
 drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_min_lum = DV_PQ_GRAPHIC_MIN_LUM;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:pr_dv_dbg("graphic follow video changed %d-%d\n",:1
+
+# --- 0018: vout device checked before the sink min/max read (upstream 4dbe1c27) ---
+drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinfo->vout_device->dv_info &&:2

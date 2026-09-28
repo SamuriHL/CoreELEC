@@ -1,0 +1,39 @@
+From 4dbe1c27ae176fde4c1cbef7506618fd7f62b976 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 28 Sep 2026 08:30:17 -0500
+Subject: [PATCH] amdv: check the vout device before reading sink min/max
+
+With FLAG_USE_SINK_MIN_MAX set, both metadata parsers read the sink's
+Dolby Vision info through vinfo->vout_device unchecked. While a display
+mode is reset, the current vinfo is the null mode without a vout
+device, and the vsync handler oopses on it.
+
+Upstream CoreELEC/common_drivers 4dbe1c27, re-anchored onto our stack:
+patches 0006/0008/0014/0015/0017 reshape both sink min/max blocks, and
+we keep FLAG_USE_SINK_MIN_MAX on (upstream 4b50c894 turned it off), so
+the unchecked read is live here.
+---
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index 52640f3..da62895 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -9338,7 +9338,8 @@ int amdv_parse_metadata_v1(struct vframe_s *vf,
+ 		const u32 fmt_graphic_min = graphic_min;
+ 		const u32 fmt_graphic_max = graphic_max;
+ 
+-		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
++		if (vinfo->vout_device && vinfo->vout_device->dv_info &&
++		    vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+ 			} else if (vinfo->vout_device->dv_info->ver == 1) {
+@@ -10961,7 +10962,8 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 		const u32 fmt_graphic_min = graphic_min;
+ 		const u32 fmt_graphic_max = graphic_max;
+ 
+-		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
++		if (vinfo->vout_device && vinfo->vout_device->dv_info &&
++		    vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+ 			} else if (vinfo->vout_device->dv_info->ver == 1) {
