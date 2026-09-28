@@ -11,9 +11,3 @@ drivers/stream_input/amports/amstream.c:vbuf->stream_offset, pts);:0
 
 # --- 0002: slave programs the stream write pointer (dual-layer, no parser) ---
 drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master's last run:2
-
-# --- 0003: BL/EL pair key stamped by vh265 ---
-drivers/frame_provider/decoder/h265/vh265.c:static atomic_t dv_pair_epoch_seq = ATOMIC_INIT(0);:1
-drivers/frame_provider/decoder/h265/vh265.c:hevc->cur_pic->dv_pair_key = dv_pair_stamp(hevc, vdec);:2
-drivers/frame_provider/decoder/h265/vh265.c:hevc->dv_pair_handoff_seq++;:1
-drivers/frame_provider/decoder/h265/vh265.c:vf->dv_pair_key = pic->dv_pair_key;:1

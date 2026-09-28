@@ -127,10 +127,3 @@ drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_m
 drivers/media/enhancement/amdolby_vision/amdv.c:old_amdv_graphic_follow_video =:1
 drivers/media/enhancement/amdolby_vision/amdv.c:new_m_dovi_setting.set_graphic_min_lum = DV_PQ_GRAPHIC_MIN_LUM;:1
 drivers/media/enhancement/amdolby_vision/amdv.c:pr_dv_dbg("graphic follow video changed %d-%d\n",:1
-
-# --- 0018: amdv pairs the EL by the decoder's pair key ---
-include/linux/amlogic/media/vfm/vframe.h:u64 dv_pair_key;:1
-drivers/media/enhancement/amdolby_vision/amdv.c:el_vf = dvel_get_pair_for_bl(vf);:2
-drivers/media/enhancement/amdolby_vision/amdv.c:dvel_retire_older(vf->dv_pair_key);:2
-drivers/media/enhancement/amdolby_vision/amdv.c:dvel_pair_stats_flush();:1
-drivers/media/video_sink/video.c:if (amdv_dvel_keyed(vf)):1
