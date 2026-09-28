@@ -54,10 +54,13 @@ src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_tell_time(bd
 src/libbluray/bluray.c:_bdj_pt_release(bd, :8
 src/libbluray/bluray.c:bd->bdj_pt_releasing = 1;:1
 src/libbluray/bluray.c:!bd->bdj_pt_chapter_valid && param != 0xffff) {:1
+src/libbluray/bluray.c:bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq + 1;:1
 src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);:1
 # 14 PRESENT xlets stay NOT_LOADED until started
 src/libbluray/bdj/java/org/videolan/BDJLoader.java:proxys[i].initPresent();:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:loadedView = hiddenLoad;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedViewSeq == viewSeqAtStart):1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedView && (s == NOT_LOADED || s == LOADED || s == PAUSED)):1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedView && state == PAUSED && !hiddenLoad && !cmd.isLoaderInit()) {:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(true);:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:                loadedView = true;:1
@@ -65,10 +68,40 @@ src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(false);:5
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean presentOnly = false;:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:5
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(:7
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(false);:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(false);:2
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):2
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (presentOnly && (s == LOADED || s == PAUSED)):1
 # 39 pre-1.5.1 hardening backport
-src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:NPTRate(int numerator, int denominator) {:1
-# 15 m2ts_filter PID list sorted (PG before IG)
-src/libbluray/decoders/m2ts_filter.c:_pid_in_list() stops at the first larger PID */:1
+src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
+src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1
+src/libbluray/bdnav/clpi_parse.c:BD_DEBUG(DBG_HDMV | DBG_CRIT, "clpi_parse: invalid EP fine reference %u\n", coarse[ii].ref_ep_fine_id);:1
+src/libbluray/bdnav/clpi_parse.c:if (stc_id >= atc->offset_stc_id &&:1
+src/libbluray/bdnav/clpi_parse.c:if (entry->num_ep_fine < 1) {:1
+src/libbluray/bdnav/mpls_parse.c:if (sp->sub_play_item != NULL) {:1
+src/libbluray/bdnav/navigation.c:BD_DEBUG(DBG_NAV | DBG_CRIT, "_fill_mark(): invalid play_item_ref %d\n", plm->play_item_ref);:1
+src/libbluray/bdnav/navigation.c:if (chapter >= title->chap_list.count) {:1
+src/libbluray/bdnav/navigation.c:if (mark >= title->mark_list.count) {:1
+src/libbluray/bdnav/sound_parse.c:if (bs_seek_byte(&bs, (int64_t)data_start + data_offsets[i]) < 0) {:1
+src/libbluray/decoders/graphics_processor.c:while (p && (p->buf[0] != seg_type || p->len < idv_pos + idv_len || memcmp(p->buf + idv_pos, idv, idv_len))) {:1
+src/libbluray/decoders/graphics_processor.c:BD_DEBUG(DBG_DECODE|DBG_CRIT, "Missing header in segment 0x%02x, len=%u\n", type, p->len);:1
+src/libbluray/decoders/graphics_processor.c:BD_DEBUG(DBG_DECODE|DBG_CRIT, "Missing header in segment 0x%02x, len=%u\n", type, next->len);:1
+src/libbluray/decoders/m2ts_demux.c:BD_DEBUG(DBG_DECODE, "invalid BDAV TS (PES header too short for PTS)\n");:1
+src/libbluray/decoders/pg_decode.c:#include <inttypes.h>:1
+src/libbluray/decoders/pg_decode.c:int64_t pixels_left = (int64_t)p->width * p->height;:1
+src/libbluray/decoders/pg_decode.c:BD_DEBUG(DBG_DECODE, "pg_decode_object(): too many pixels (%" PRId64 ")\n", -pixels_left);:1
+src/libbluray/decoders/pg_decode.c:BD_DEBUG(DBG_DECODE, "pg_decode_object(): missing %" PRId64 " pixels\n", pixels_left);:1
+src/libbluray/hdmv/hdmv_vm.c:case INSN_SHL:    if (src < 32) dst <<= src; else dst = 0; break;:1
+src/util/bits.c:#include "util/macro.h":1
+src/util/bits.c:static BD_USED int _bs_read( BITSTREAM *bs):1
+src/util/bits.c:static BD_USED int _bs_read_at( BITSTREAM *bs, int64_t off ):1
+src/util/bits.c:int64_t pos = bs->pos + (bs->bb.p - bs->bb.p_start);:1
+src/util/bits.c:BD_ASSERT(i_count <= 32);:2
+src/util/bits.c:if (i_count > 32) {:2
+src/util/bits.c:_bs_refill(bs);:2
+src/util/macro.h:#define BD_ASSERT(p)                                      \:1
+src/libbluray/bdj/java/org/dvb/dsmcc/DSMCCObject.java:if (!loaded):1
+src/libbluray/bdnav/clpi_parse.c:if (jj < 0) {:1
+src/libbluray/bdnav/clpi_parse.c:if (jj > 0) {:1
+# the two below also occur once in pristine 1.5.0: the count (2) is what catches a dropped hunk
+src/libbluray/bdnav/clpi_parse.c:if (cpi->num_stream_pid < 1 || !cpi->entry) {:2
+src/libbluray/bdnav/navigation.c:if (angle > 8) {:2

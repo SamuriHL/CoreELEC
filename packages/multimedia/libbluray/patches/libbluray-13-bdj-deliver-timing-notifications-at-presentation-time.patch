@@ -48,7 +48,7 @@ that never enables it gets libbluray's existing behaviour.
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
-@@ -155,6 +155,35 @@ struct bluray {
+@@ -155,6 +155,36 @@ struct bluray {
       */
      uint8_t         end_of_playlist; /* 1 - reached. 3 - processed . */
      uint8_t         app_scr;         /* 1 if application provides presentation timetamps */
@@ -73,6 +73,7 @@ that never enables it gets libbluray's existing behaviour.
 +     * PLAYITEM/CHAPTER events rather than a whole playitem ahead of them. */
 +    uint8_t         bdj_pt_playitem_valid, bdj_pt_chapter_valid;
 +    uint32_t        bdj_pt_playitem, bdj_pt_chapter;
++    uint32_t        bdj_pt_chapter_seed_seq; /* queue seq of the CHAPTER that seeded the shadow */
 +    unsigned        bdj_pt_head, bdj_pt_count;
 +    struct {
 +        uint32_t seq;
@@ -84,7 +85,7 @@ that never enables it gets libbluray's existing behaviour.
      uint8_t         uo_restriction_level; /* 0 to ignore UO restrictions */
  
      /* HDMV */
-@@ -273,6 +302,25 @@ static int _queue_event(BLURAY *bd, uint32_t event, uint32_t param)
+@@ -273,6 +303,25 @@ static int _queue_event(BLURAY *bd, uint32_t event, uint32_t param)
   * PSR utils
   */
  
@@ -110,7 +111,7 @@ that never enables it gets libbluray's existing behaviour.
  static void _update_time_psr(BLURAY *bd, uint32_t time)
  {
      /*
-@@ -293,7 +341,7 @@ static void _update_time_psr(BLURAY *bd, uint32_t time)
+@@ -293,7 +342,7 @@ static void _update_time_psr(BLURAY *bd, uint32_t time)
          return;
      }
  
@@ -119,7 +120,7 @@ that never enables it gets libbluray's existing behaviour.
  }
  
  static uint32_t _update_time_psr_from_stream(BLURAY *bd)
-@@ -376,7 +424,7 @@ static void _update_clip_psrs(BLURAY *bd, const NAV_CLIP *clip)
+@@ -376,7 +425,7 @@ static void _update_clip_psrs(BLURAY *bd, const NAV_CLIP *clip)
      uint32_t psr_val;
  
      bd_psr_write(bd->regs, PSR_PLAYITEM, clip->ref);
@@ -128,7 +129,7 @@ that never enables it gets libbluray's existing behaviour.
  
      /* Validate selected audio, subtitle and IG stream PSRs */
      if (stn->num_audio) {
-@@ -1408,6 +1456,25 @@ BD_DISC *bdpriv_get_disc(BLURAY *bd)
+@@ -1408,6 +1457,25 @@ BD_DISC *bdpriv_get_disc(BLURAY *bd)
  uint32_t bdpriv_reg_read(BLURAY *bd, int psr, int reg)
  {
      if (psr) {
@@ -154,7 +155,7 @@ that never enables it gets libbluray's existing behaviour.
          return bd_psr_read(bd->regs, reg);
      } else {
          return bd_gpr_read(bd->regs, reg);
-@@ -1557,12 +1624,125 @@ static int _start_bdj(BLURAY *bd, unsigned title)
+@@ -1557,12 +1625,131 @@ static int _start_bdj(BLURAY *bd, unsigned title)
          }
      }
  
@@ -184,8 +185,13 @@ that never enables it gets libbluray's existing behaviour.
 +            bd->bdj_pt_playitem       = bd->bdj_pt_queue[idx].param;
 +            bd->bdj_pt_playitem_valid = 1;
 +        } else if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_CHAPTER) {
-+            bd->bdj_pt_chapter       = bd->bdj_pt_queue[idx].param;
-+            bd->bdj_pt_chapter_valid = 1;
++            /* a CHAPTER held before the one that seeded the shadow (the
++             * 0xffff reset marker) must not take it back */
++            if (!bd->bdj_pt_chapter_valid ||
++                (int32_t)(bd->bdj_pt_queue[idx].seq - bd->bdj_pt_chapter_seed_seq) >= 0) {
++                bd->bdj_pt_chapter       = bd->bdj_pt_queue[idx].param;
++                bd->bdj_pt_chapter_valid = 1;
++            }
 +        }
 +        if (bd->bdjava != NULL) {
 +            bdj_process_event(bd->bdjava, bd->bdj_pt_queue[idx].ev, bd->bdj_pt_queue[idx].param);
@@ -244,8 +250,9 @@ that never enables it gets libbluray's existing behaviour.
 +        bd->bdj_pt_playitem       = param;
 +        bd->bdj_pt_playitem_valid = 1;
 +    } else if (!is_time && ev == BDJ_EVENT_CHAPTER && !bd->bdj_pt_chapter_valid && param != 0xffff) {
-+        bd->bdj_pt_chapter       = param;
-+        bd->bdj_pt_chapter_valid = 1;
++        bd->bdj_pt_chapter          = param;
++        bd->bdj_pt_chapter_valid    = 1;
++        bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq + 1; /* this entry's seq, assigned below */
 +    }
 +
 +    idx = (bd->bdj_pt_head + bd->bdj_pt_count) % size;
@@ -280,7 +287,7 @@ that never enables it gets libbluray's existing behaviour.
          return bdj_process_event(bd->bdjava, ev, param);
      }
      return -1;
-@@ -1570,6 +1750,10 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
+@@ -1570,6 +1757,10 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
  
  static void _stop_bdj(BLURAY *bd)
  {
@@ -291,7 +298,7 @@ that never enables it gets libbluray's existing behaviour.
      if (bd->bdjava != NULL) {
          bdj_process_event(bd->bdjava, BDJ_EVENT_STOP, 0);
          _queue_event(bd, BD_EVENT_STILL, 0);
-@@ -1579,6 +1763,7 @@ static void _stop_bdj(BLURAY *bd)
+@@ -1579,6 +1770,7 @@ static void _stop_bdj(BLURAY *bd)
  
  static void _close_bdj(BLURAY *bd)
  {
@@ -299,7 +306,7 @@ that never enables it gets libbluray's existing behaviour.
      if (bd->bdjava != NULL) {
          bdj_close(bd->bdjava);
          bd->bdjava = NULL;
-@@ -2537,6 +2722,14 @@ static int _init_ig_stream(BLURAY *bd)
+@@ -2537,6 +2729,14 @@ static int _init_ig_stream(BLURAY *bd)
  
  static void _close_playlist(BLURAY *bd)
  {
@@ -314,7 +321,7 @@ that never enables it gets libbluray's existing behaviour.
      if (bd->graphics_controller) {
          gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
      }
-@@ -4094,6 +4287,56 @@ void bd_set_scr(BLURAY *bd, int64_t pts)
+@@ -4094,6 +4294,56 @@ void bd_set_scr(BLURAY *bd, int64_t pts)
      bd_mutex_unlock(&bd->mutex);
  }
  
