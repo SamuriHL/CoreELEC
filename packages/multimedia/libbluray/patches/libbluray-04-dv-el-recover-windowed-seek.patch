@@ -16,7 +16,10 @@ libbluray passed every EL access unit before the in time (a non-seamless
 playitem starting inside a clip re-reads the previous playitem's tail, and
 the recovery rewind reaches further back) and the demuxer got duplicate EL
 access units with no base layer to pair with. The target frame's EL IRAP,
-at the in time, is kept.
+at the in time, is kept. This cut applies at playitem entry only: a seek
+re-arms the filter at the clip's in time, not the seek point, so after a
+mid-clip seek the recovery window's EL units from the previous GOP still
+pass, as before, and the player's DTS pairing drops them.
 ---
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c

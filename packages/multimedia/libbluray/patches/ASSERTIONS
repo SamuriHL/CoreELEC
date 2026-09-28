@@ -53,15 +53,22 @@ src/libbluray/bluray.c:_write_time_psr(bd, bd->st0.clip, time);:1
 src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_tell_time(bd);:1
 src/libbluray/bluray.c:_bdj_pt_release(bd, :8
 src/libbluray/bluray.c:bd->bdj_pt_releasing = 1;:1
+src/libbluray/bluray.c:!bd->bdj_pt_chapter_valid && param != 0xffff) {:1
+src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);:1
 # 14 PRESENT xlets stay NOT_LOADED until started
 src/libbluray/bdj/java/org/videolan/BDJLoader.java:proxys[i].initPresent();:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:loadedView = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean wasLoadedView = loadedView;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:loadedView = hiddenLoad;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedView && state == PAUSED && !hiddenLoad && !cmd.isLoaderInit()) {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(true);:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:                loadedView = true;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(false);:5
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean presentOnly = false;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:4
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit();:6
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit();:2
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:5
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(:7
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(false);:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):2
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (presentOnly && (s == LOADED || s == PAUSED)):1
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:NPTRate(int numerator, int denominator) {:1
+# 15 m2ts_filter PID list sorted (PG before IG)
+src/libbluray/decoders/m2ts_filter.c:_pid_in_list() stops at the first larger PID */:1

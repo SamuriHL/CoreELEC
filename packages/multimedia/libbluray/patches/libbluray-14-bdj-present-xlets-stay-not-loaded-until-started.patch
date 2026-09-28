@@ -20,7 +20,9 @@ notifyDestroyed ends that. start() on the pre-initialised xlet goes
 straight to startXlet(). An application that load()s or init()s a xlet
 it was shown as NOT_LOADED gets a success event, as it would on a
 player, although the loader already did the work: its state then reads
-LOADED until the application moves the xlet on itself. An application call
+LOADED (from the moment load() is called) until the application moves the
+xlet on itself, and every state-change event of that move starts from the
+LOADED the application was shown. An application call
 that arrives before the loader's init has run cancels that init, so the
 xlet takes the ordinary lifecycle and listeners never see the loader's
 init surface after the application's own load(). A proxy kept from the
@@ -31,7 +33,7 @@ libbluray 1.5.1 and master.
 
 --- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
 +++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
-@@ -60,11 +60,61 @@
+@@ -60,11 +60,66 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public int getState() {
@@ -56,18 +58,23 @@ libbluray 1.5.1 and master.
 +     * call that arrives first cancels it and takes the ordinary path, so the
 +     * disc sees one plain lifecycle instead of the loader's init surfacing
 +     * after its own load(). Returns true when the init had already run (or is
-+     * running), i.e. the application's command must be answered as hidden. */
-+    private boolean takePresentInit() {
++     * running), i.e. the application's command must be answered as hidden.
++     * A hidden load() moves getState() straight from NOT_LOADED to the LOADED
++     * view, with no PAUSED visible before its command runs. */
++    private boolean takePresentInit(boolean forLoad) {
 +        synchronized (cmds) {
 +            AppCommand init = presentInit;
 +            presentInit = null;
 +            if (!presentOnly)
 +                return false;
-+            presentOnly = false;
 +            if (init != null && cmds.remove(init)) {
++                presentOnly = false;
 +                init.release();
 +                return false;
 +            }
++            if (forLoad)
++                loadedView = true;
++            presentOnly = false;
 +            return true;
 +        }
 +    }
@@ -88,55 +95,55 @@ libbluray 1.5.1 and master.
      }
  
      public void load() {
-+        boolean hidden = takePresentInit();
++        boolean hidden = takePresentInit(true);
          AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
 +        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
              cmds.notifyAll();
-@@ -72,7 +122,9 @@
+@@ -72,7 +127,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public void init() {
-+        boolean hidden = takePresentInit();
++        boolean hidden = takePresentInit(false);
          AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
 +        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
              cmds.notifyAll();
-@@ -84,6 +136,7 @@
+@@ -84,6 +141,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public void start(String[] args) {
-+        takePresentInit();
++        takePresentInit(false);
          AppCommand cmd = new AppCommand(AppCommand.CMD_START, args);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -92,6 +145,7 @@
+@@ -92,6 +150,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public void stop(boolean force, int timeout) {
-+        takePresentInit();
++        takePresentInit(false);
          AppCommand cmd = new AppCommand(AppCommand.CMD_STOP, Boolean.valueOf(force));
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -109,6 +163,7 @@
+@@ -109,6 +168,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public void pause() {
-+        takePresentInit();
++        takePresentInit(false);
          AppCommand cmd = new AppCommand(AppCommand.CMD_PAUSE, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -117,6 +172,7 @@
+@@ -117,6 +177,7 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public void resume() {
-+        takePresentInit();
++        takePresentInit(false);
          AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -350,14 +406,35 @@
+@@ -350,14 +411,36 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              int fromState = state;
              int toState;
              boolean ret;
@@ -147,20 +154,21 @@ libbluray 1.5.1 and master.
 +            if (hiddenDone)
 +                fromState = NOT_LOADED;
 +            /* After a hidden load the application believes the xlet LOADED while
-+             * the loader has it PAUSED: its own init() is then the LOADED->PAUSED
-+             * a player would report, already done, and start() starts from the
-+             * LOADED it was shown. */
-+            boolean wasLoadedView = loadedView;
-+            if (wasLoadedView && state == PAUSED) {
-+                if (cmd.getCommand() == AppCommand.CMD_INIT) {
-+                    fromState = LOADED;
++             * the loader has it PAUSED: every command then starts from the
++             * LOADED it was shown, and its own init() is the LOADED->PAUSED a
++             * player would report, already done. (Not the hidden load itself:
++             * that is the NOT_LOADED->LOADED above.) */
++            boolean hiddenLoad = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;
++            if (loadedView && state == PAUSED && !hiddenLoad && !cmd.isLoaderInit()) {
++                fromState = LOADED;
++                if (cmd.getCommand() == AppCommand.CMD_INIT)
 +                    hiddenDone = true;
-+                } else if (cmd.getCommand() == AppCommand.CMD_START) {
-+                    fromState = LOADED;
-+                }
 +            }
-+            /* any command other than a hidden load ends the LOADED view */
-+            loadedView = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;
++            /* any application command other than a hidden load ends the LOADED
++             * view; the loader's own init (possibly still running when a hidden
++             * load() set it) leaves it alone */
++            if (!cmd.isLoaderInit())
++                loadedView = hiddenLoad;
              switch (cmd.getCommand()) {
              case AppCommand.CMD_LOAD:
                  toState = LOADED;
@@ -174,7 +182,7 @@ libbluray 1.5.1 and master.
                  break;
              case AppCommand.CMD_START:
                  toState = STARTED;
-@@ -377,11 +454,13 @@
+@@ -377,11 +460,13 @@ class BDJAppProxy implements DVBJProxy, Runnable {
                  ret = doResume();
                  break;
              case AppCommand.CMD_NOTIFY_DESTROYED:
@@ -188,7 +196,7 @@ libbluray 1.5.1 and master.
                  toState = PAUSED;
                  state = PAUSED;
                  ret = true;
-@@ -389,7 +468,12 @@
+@@ -389,7 +474,12 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              default:
                  return;
              }
@@ -202,7 +210,7 @@ libbluray 1.5.1 and master.
              cmd.release();
              if (state == DESTROYED)
                  state = NOT_LOADED;
-@@ -398,7 +482,10 @@
+@@ -398,7 +488,10 @@ class BDJAppProxy implements DVBJProxy, Runnable {
  
      private BDJXletContext context;
      private Xlet xlet;
@@ -214,7 +222,7 @@ libbluray 1.5.1 and master.
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -431,6 +518,22 @@
+@@ -431,6 +524,22 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              return arg;
          }
  
@@ -237,7 +245,7 @@ libbluray 1.5.1 and master.
          public boolean waitDone(int timeoutMs) {
              synchronized (this) {
                  while (!done) {
-@@ -466,6 +569,8 @@
+@@ -466,6 +575,8 @@ class BDJAppProxy implements DVBJProxy, Runnable {
  
          private int cmd;
          private Object arg;
@@ -248,7 +256,7 @@ libbluray 1.5.1 and master.
  }
 --- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
 +++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
-@@ -297,7 +297,7 @@
+@@ -297,7 +297,7 @@ public class BDJLoader {
                      proxys[i].start();
                  } else if (code == AppEntry.PRESENT) {
                      logger.info("Init xlet " + i + ": " + appTable[i].getInitialClass());

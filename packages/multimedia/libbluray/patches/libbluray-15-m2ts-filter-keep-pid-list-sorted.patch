@@ -1,0 +1,33 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] m2ts_filter: keep the initial PID list sorted (PG before IG)
+
+m2ts_filter_init() fills the wipe list with video, audio, IG (0x1400..)
+and then PG (0x1200..) PIDs, but _pid_in_list() stops at the first entry
+larger than the PID it looks for, so no PG PID was ever found: at every
+playitem start inside a clip the presentation-graphics streams bypassed
+the in-time cut and the previous playitem's subtitle display sets reached
+the player. After a seek the list is rebuilt through _add_pid(), which
+sorts, so there PG was cut - playitem starts now behave like seeks.
+
+Present in libbluray 1.5.0, 1.5.1 and master.
+
+--- a/src/libbluray/decoders/m2ts_filter.c
++++ b/src/libbluray/decoders/m2ts_filter.c
+@@ -92,12 +92,14 @@ M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
+         for (ii = 0; ii < num_audio; ii++) {
+             pid[npid++] = HDMV_PID_AUDIO_FIRST + ii;
+         }
+-        for (ii = 0; ii < num_ig; ii++) {
+-            pid[npid++] = HDMV_PID_IG_FIRST + ii;
+-        }
++        /* PG (0x1200..) before IG (0x1400..): the lists must stay sorted,
++         * _pid_in_list() stops at the first larger PID */
+         for (ii = 0; ii < num_pg; ii++) {
+             pid[npid++] = HDMV_PID_PG_FIRST + ii;
+         }
++        for (ii = 0; ii < num_ig; ii++) {
++            pid[npid++] = HDMV_PID_IG_FIRST + ii;
++        }
+     }
+ 
+     return p;
