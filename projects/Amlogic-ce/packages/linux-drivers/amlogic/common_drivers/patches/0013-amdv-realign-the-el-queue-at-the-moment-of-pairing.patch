@@ -35,10 +35,14 @@ Only ELs already queued are retired; nothing waits for an EL or takes one ahead
 of its BL. The held-miss list is kept apart from the dv_vf table, because a BL in
 that table is never parsed again and a still that missed must still be able to
 take its late EL. A BL whose EL the decoder produced but amdv bypassed is held
-the same way (its EL is owed); after BLs for which the decoder produced no EL
-the count restarts, and a new EL receiver registration takes the decoders'
+the same way (its EL is owed, and the queue keeps draining while the bypass
+lasts); after BLs for which the decoder produced no EL the count restarts,
+excluding those still on screen, and a new EL receiver registration takes the decoders'
 totals at that moment as its baseline. amvideo_vf_put() now returns the EL
-before the BL, so the EL total never trails the BL total mid-put.
+before the BL, so the EL total never trails the BL total mid-put. On
+multi_dv_mode (S6) dvel unregistration now also clears the EL-bearing dv_inst
+entries it left behind ("multi-mode todo"), so a reused BL address in the next
+session cannot carry a stale EL into the new EL decoder.
 
 Known limit, shared with the vendor check and the version this replaces: a BL
 the player drops while an earlier BL is still queued for display is counted
@@ -50,8 +54,8 @@ Signed-off-by: SamuriHL <samurihl@msn.com>
 ---
 diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
 --- a/drivers/media/enhancement/amdolby_vision/amdv.c	2026-09-27 21:35:17.817737099 -0400
-+++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-09-27 22:11:15.315452428 -0400
-@@ -2208,6 +2208,165 @@
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-09-27 22:23:04.619743945 -0400
+@@ -2208,6 +2208,197 @@
  	return vf;
  }
  
@@ -78,6 +82,10 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
 + */
 +#define DVEL_RETIRE_MAX 32
 +static struct vframe_s *dvel_miss_bl[16];
++/* BLs for which the decoder produced no EL, not yet put back: their puts are
++ * still to come and must not count as owed ELs after a rebase.
++ */
++static struct vframe_s *dvel_noel_bl[16];
 +static s32 dvel_put_base;
 +static bool dvel_put_rebase;
 +static unsigned int dvel_miss_count;
@@ -109,6 +117,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
 +static void dvel_miss_reset_locked(void)
 +{
 +	memset(dvel_miss_bl, 0, sizeof(dvel_miss_bl));
++	memset(dvel_noel_bl, 0, sizeof(dvel_noel_bl));
 +	dvel_put_base = 0;
 +	dvel_put_rebase = false;
 +}
@@ -121,6 +130,28 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
 +	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++)
 +		if (dvel_miss_bl[i] == bl)
 +			dvel_miss_bl[i] = NULL;
++	for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++)
++		if (dvel_noel_bl[i] == bl)
++			dvel_noel_bl[i] = NULL;
++}
++
++/* A BL the decoder gave no EL: nothing is owed for it, now or when it is put. */
++static void dvel_note_noel(struct vframe_s *bl)
++{
++	unsigned long flags;
++	int i, free = -1;
++
++	spin_lock_irqsave(&amdv_lock, flags);
++	for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++) {
++		if (dvel_noel_bl[i] == bl)
++			break;
++		if (!dvel_noel_bl[i] && free < 0)
++			free = i;
++	}
++	if (i == ARRAY_SIZE(dvel_noel_bl) && free >= 0)
++		dvel_noel_bl[free] = bl;
++	dvel_put_rebase = true;
++	spin_unlock_irqrestore(&amdv_lock, flags);
 +}
 +
 +/* Record (miss) or clear (!miss) a BL shown without its EL. Kept apart from
@@ -189,7 +220,12 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
 +	 * bypassed): those BL returns are not owed ELs. Start counting afresh.
 +	 */
 +	if (dvel_put_rebase) {
-+		dvel_put_base = (s32)(bl_put - el_put);
++		int noel = 0;
++
++		for (i = 0; i < ARRAY_SIZE(dvel_noel_bl); i++)
++			if (dvel_noel_bl[i])
++				noel++;
++		dvel_put_base = (s32)(bl_put - el_put) + noel;
 +		dvel_put_rebase = false;
 +	}
 +	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++)
@@ -217,7 +253,29 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  static struct vframe_s *dv_vf[16][2];
  static void *metadata_parser;
  static bool metadata_parser_reset_flag;
-@@ -2252,6 +2411,7 @@
+@@ -2218,6 +2409,7 @@
+ 	unsigned long flags;
+ 	struct vframe_s *el_put[16];
+ 	int el_num = 0;
++	bool dvel_unreg_multi = false;
+ 
+ 	spin_lock_irqsave(&amdv_lock, flags);
+ 	if (vfm_path_on) {
+@@ -2232,6 +2424,13 @@
+ 			//	dv_inst[dv_id].dv_vf[i][0] = NULL;
+ 			//}
+ 			//dv_inst[dv_id].frame_count = 0;
++			/* The EL decoder is going away: a BL still paired with one of
++			 * its ELs would otherwise keep that pointer, and a new session
++			 * reusing the BL's address would skip its parse and put the old
++			 * EL into the new EL decoder. Only EL-bearing entries belong to
++			 * this session; single-layer instances are left alone.
++			 */
++			dvel_unreg_multi = true;
+ 		} else {
+ 			for (i = 0; i < 16; i++) {
+ 				if (dv_vf[i][0]) {
+@@ -2252,11 +2451,31 @@
  		crc_bypass_count = 0;
  		amdv_el_disable = 0;
  	}
@@ -225,7 +283,31 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  	vfm_path_on = false;
  	spin_unlock_irqrestore(&amdv_lock, flags);
  
-@@ -2292,6 +2452,7 @@
+ 	for (i = 0; i < el_num; i++)
+ 		dvel_vf_put(el_put[i]);
++
++	if (dvel_unreg_multi) {
++		int inst;
++
++		for (inst = 0; inst < NUM_INST; inst++) {
++			el_num = 0;
++			spin_lock_irqsave(&amdv_lock, flags);
++			for (i = 0; i < 16; i++) {
++				if (dv_inst[inst].dv_vf[i][1]) {
++					el_put[el_num++] = dv_inst[inst].dv_vf[i][1];
++					dv_inst[inst].dv_vf[i][0] = NULL;
++					dv_inst[inst].dv_vf[i][1] = NULL;
++				}
++			}
++			spin_unlock_irqrestore(&amdv_lock, flags);
++			for (i = 0; i < el_num; i++)
++				dvel_vf_put(el_put[i]);
++		}
++	}
+ }
+ EXPORT_SYMBOL(dv_vf_light_unreg_provider);
+ 
+@@ -2292,6 +2511,7 @@
  		crc_bypass_count = 0;
  		amdv_el_disable = 0;
  	}
@@ -233,7 +315,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  	vfm_path_on = true;
  	spin_unlock_irqrestore(&amdv_lock, flags);
  }
-@@ -2314,6 +2475,7 @@
+@@ -2314,6 +2534,7 @@
  			pr_dv_dbg("%s, provider %s registered\n",
  				__func__, provider_name);
  		dv_vf_light_reg_provider();
@@ -241,7 +323,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  	}
  	return 0;
  }
-@@ -5147,6 +5309,7 @@
+@@ -5147,6 +5368,7 @@
  		return;
  
  	spin_lock_irqsave(&amdv_lock, flags);
@@ -249,7 +331,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  	if (multi_dv_mode) {
  		if (vf && dv_inst_valid(vf->src_fmt.dv_id))
  			dv_id = vf->src_fmt.dv_id;
-@@ -9708,6 +9871,7 @@
+@@ -9708,6 +9930,7 @@
  	bool el_flag = 0;
  	bool el_halfsize_flag = 1;
  	bool el_missing = false;
@@ -257,7 +339,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  	u32 w = 0xffff;
  	u32 h = 0xffff;
  	int meta_flag_bl = 1;
-@@ -9826,6 +9990,7 @@
+@@ -9826,6 +10049,7 @@
  				}
  			}
  		}
@@ -265,7 +347,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  		if (debug_dolby & 1)
  			pr_dv_dbg("[inst%d vd%d]%s get %p(%d,index %d),fmt %d,aux %p %x,el %d\n",
  				     dv_id + 1,
-@@ -10012,6 +10177,8 @@
+@@ -10012,6 +10236,8 @@
  		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
  		if (req.dv_enhance_exist && toggle_mode == 1 &&
  		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
@@ -274,7 +356,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  			el_vf = dvel_vf_get();
  			if (el_vf &&  (el_vf->pts_us64 == vf->pts_us64 ||
  			    !(dolby_vision_flags & FLAG_CHECK_ES_PTS))) {
-@@ -10066,6 +10233,7 @@
+@@ -10066,6 +10292,7 @@
  						 el_req.aux_size);
  				}
  				amdvdolby_vision_vf_add(vf, el_vf);
@@ -282,7 +364,7 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
  				el_flag = 1;
  				if (vf->width == el_vf->width)
  					el_halfsize_flag = 0;
-@@ -10079,12 +10247,28 @@
+@@ -10079,12 +10306,35 @@
  					("bl(%p-%lld) not found el(%p-%lld)\n",
  					 vf, vf->pts_us64,
  					 el_vf, el_vf->pts_us64);
@@ -304,10 +386,17 @@ diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhan
 +			 */
 +			dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
 +			if (dec_el_exist && dvel_provider &&
-+			    !strcmp(dvel_provider, "dveldec"))
++			    !strcmp(dvel_provider, "dveldec")) {
++				/* keep the EL queue draining while amdv bypasses it,
++				 * as the vendor comment above requires; only ELs of
++				 * BLs already toggled are retired
++				 */
++				if (!strcmp(dv_provider[vd_path], "dvbldec"))
++					dvel_retire_owed(dv_provider[vd_path], vf);
 +				dvel_note_miss(vf, true, false);
-+			else
-+				dvel_put_rebase = true;
++			} else {
++				dvel_note_noel(vf);
++			}
  		}
  
  		/* This picture was supposed to have an enhancement layer and did

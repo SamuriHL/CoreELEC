@@ -96,10 +96,15 @@ drivers/media/enhancement/amdolby_vision/amdv.c:el_halfsize_flag = 0;:5
 
 # 0013: realign the EL queue at the moment of pairing (put totals + held misses)
 drivers/media/enhancement/amdolby_vision/amdv.c:static void dvel_retire_owed(const char *bl_provider, struct vframe_s *bl):1
-drivers/media/enhancement/amdolby_vision/amdv.c:dvel_retire_owed(dv_provider[vd_path], vf);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_retire_owed(dv_provider[vd_path], vf);:2
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_miss(vf, true, true);:1
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_miss_put_locked(vf);:1
 drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_baseline();:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_miss(vf, true, false);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_note_noel(vf);:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_put_base = (s32)(bl_put - el_put) + noel;:1
+drivers/media/enhancement/amdolby_vision/amdv.c:dvel_unreg_multi = true;:1
+drivers/media/video_sink/video.c:	amdv_vf_put(vf);:1
 drivers/media/video_sink/video.c:dvel_realign_to_bl:0
 drivers/media/video_sink/video.c:Ahead of the BL's own put so the EL put total never trails the BL's::1
 # 0014: VSVDB v2 target luminance decoded as PQ codes at both parse sites; the v1
