@@ -1,0 +1,342 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amdv: realign the EL queue at the moment of pairing
+
+amdv_parse_metadata_v2_stb() pairs each base-layer frame with whatever is at the
+head of the dvel queue; FLAG_CHECK_ES_PTS is off and the slave EL carries no pts
+(pts_us64 == 0 on every EL frame, measured), so position is the only identity.
+Any BL that leaves without its EL leaves that EL at the head, and every later
+composite would use the wrong one.
+
+The vendor keeps the queues in step in recv_common_dequeue_frame()
+(video_receiver.c): the decoders' vf_put_count totals must match, and a BL
+surplus is a surplus of stale ELs to drop. That receiver is not on the Blu-ray
+chain (dvbldec amlvideo deinterlace amvideo), so the previous version of this
+patch ran the same check from the amvideo vsync before the dequeue. Two faults:
+
+  - it sampled the totals before the unpaired BL had been put back, so after a
+    0012 miss it acted one vsync late: the late EL paired with the next BL, and
+    the next check then dropped that BL's own, correct EL. Each miss cost a
+    BL-only frame, a mispaired frame and a destroyed EL (FEL_test fv.dbg.dmesg).
+  - amvideo_vf_put() skipped amdv_vf_put() while amdv was disabled, so a BL
+    put during a DV mode switch or display reset left its EL in the dv_vf table
+    uncounted, and the check then retired a correct queued EL (EL ahead for the
+    rest of the title). On multi_dv_mode the table is never reclaimed at session
+    end either ("multi-mode todo").
+
+The check now runs inside the parse, just before dvel_vf_get(), and adds the
+term the totals cannot see yet: BLs shown without their EL (0012 misses) that
+are still held - on screen or awaiting an RDMA-deferred put. A miss therefore
+costs exactly one BL-only frame. The routes the totals do cover are kept - above
+all a BL the player returns undisplayed, which amlvideo puts straight back to
+the decoder and which never reaches the parse (M3GAN 2.0: every start-of-feature
+"surplus" line matches a Kodi ReleaseFrame drop to the millisecond).
+
+Only ELs already queued are retired; nothing waits for an EL or takes one ahead
+of its BL. The held-miss list is kept apart from the dv_vf table, because a BL in
+that table is never parsed again and a still that missed must still be able to
+take its late EL. A BL whose EL the decoder produced but amdv bypassed is held
+the same way (its EL is owed); after BLs for which the decoder produced no EL
+the count restarts, and a new EL receiver registration takes the decoders'
+totals at that moment as its baseline. amvideo_vf_put() now returns the EL
+before the BL, so the EL total never trails the BL total mid-put.
+
+Known limit, shared with the vendor check and the version this replaces: a BL
+the player drops while an earlier BL is still queued for display is counted
+before that earlier BL is paired, so one frame can take the next EL before the
+queue settles. dvel_miss_count and dvel_retire_count
+(/sys/module/aml_media/parameters/) count BL-only frames and retired ELs.
+
+Signed-off-by: SamuriHL <samurihl@msn.com>
+---
+diff -ru a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c	2026-09-27 21:35:17.817737099 -0400
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c	2026-09-27 22:11:15.315452428 -0400
+@@ -2208,6 +2208,165 @@
+ 	return vf;
+ }
+ 
++/* Keep the EL queue in step with the BL, the way the vendor does it in
++ * recv_common_dequeue_frame() (video_receiver.c): every BL the decoder has
++ * taken back must have had its EL taken back too, so a surplus of BL returns
++ * over EL returns is a surplus of stale ELs at the head of the dvel queue.
++ *
++ * That receiver is not on the Blu-ray chain (dvbldec amlvideo deinterlace
++ * amvideo), so the check runs here, at the moment of pairing, and it adds the
++ * one term the put totals cannot see: a BL shown WITHOUT its EL (a 0012 miss)
++ * that is still on screen or waiting on an RDMA-deferred put. Its EL is owed
++ * already, but no put has said so yet - sampling the totals alone corrects one
++ * vsync late, pairs the late EL with the next BL and then retires that BL's own
++ * EL. Counting the held miss retires the late EL before the next BL pairs, so a
++ * miss costs one BL-only frame and nothing else.
++ *
++ * Routes the totals do cover: a BL the player returns undisplayed (amlvideo puts
++ * it straight back to the decoder and it never reaches this parse), and BLs
++ * toggled while amdv is disabled.
++ *
++ * Only surplus ELs that are already queued are retired: an EL is never waited
++ * for, never taken ahead of its BL, and never held here.
++ */
++#define DVEL_RETIRE_MAX 32
++static struct vframe_s *dvel_miss_bl[16];
++static s32 dvel_put_base;
++static bool dvel_put_rebase;
++static unsigned int dvel_miss_count;
++module_param(dvel_miss_count, uint, 0444);
++MODULE_PARM_DESC(dvel_miss_count, "BL frames composited without their EL");
++static unsigned int dvel_retire_count;
++module_param(dvel_retire_count, uint, 0444);
++MODULE_PARM_DESC(dvel_retire_count, "stale EL frames retired to realign the EL queue");
++
++static bool dvel_put_count(const char *provider, u32 *count);
++
++/* A new dvel session starts even with the BL decoder: whatever the BL decoder
++ * has already returned before the EL receiver registered owes nothing here.
++ */
++static void dvel_put_baseline(void)
++{
++	unsigned long flags;
++	u32 bl_put = 0, el_put = 0;
++
++	if (!dvel_put_count("dvbldec", &bl_put) ||
++	    !dvel_put_count("dveldec", &el_put))
++		return;
++	spin_lock_irqsave(&amdv_lock, flags);
++	dvel_put_base = (s32)(bl_put - el_put);
++	spin_unlock_irqrestore(&amdv_lock, flags);
++}
++
++/* caller holds amdv_lock */
++static void dvel_miss_reset_locked(void)
++{
++	memset(dvel_miss_bl, 0, sizeof(dvel_miss_bl));
++	dvel_put_base = 0;
++	dvel_put_rebase = false;
++}
++
++/* caller holds amdv_lock */
++static void dvel_miss_put_locked(struct vframe_s *bl)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++)
++		if (dvel_miss_bl[i] == bl)
++			dvel_miss_bl[i] = NULL;
++}
++
++/* Record (miss) or clear (!miss) a BL shown without its EL. Kept apart from
++ * the dv_vf table on purpose: a BL in that table is never parsed again
++ * (amdv_vf_check), and a still re-toggled after a miss must still be able to
++ * pick up its late EL.
++ */
++static void dvel_note_miss(struct vframe_s *bl, bool miss, bool count)
++{
++	unsigned long flags;
++	int i, free = -1;
++
++	spin_lock_irqsave(&amdv_lock, flags);
++	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++) {
++		if (dvel_miss_bl[i] == bl)
++			break;
++		if (!dvel_miss_bl[i] && free < 0)
++			free = i;
++	}
++	if (!miss) {
++		if (i < ARRAY_SIZE(dvel_miss_bl))
++			dvel_miss_bl[i] = NULL;
++	} else if (i == ARRAY_SIZE(dvel_miss_bl)) {
++		if (free >= 0)
++			dvel_miss_bl[free] = bl;
++		if (count)
++			dvel_miss_count++;
++	}
++	spin_unlock_irqrestore(&amdv_lock, flags);
++}
++
++/* req.vf == NULL is the decoder's put-count query (vh265.c answers with
++ * atomic_read(&hevc->vf_put_count)). aux_size is seeded with a sentinel so a
++ * provider that does not answer is detected rather than read as zero.
++ */
++static bool dvel_put_count(const char *provider, u32 *count)
++{
++	struct provider_aux_req_s req;
++
++	memset(&req, 0, sizeof(req));
++	req.aux_size = 0xffffffff;
++	vf_notify_provider_by_name(provider,
++		VFRAME_EVENT_RECEIVER_GET_AUX_DATA, (void *)&req);
++	if (req.aux_size == 0xffffffff)
++		return false;
++	*count = req.aux_size;
++	return true;
++}
++
++/* bl is the BL about to be paired: if it is itself a held miss being parsed
++ * again, its EL is the one it is about to take, not a stale one.
++ */
++static void dvel_retire_owed(const char *bl_provider, struct vframe_s *bl)
++{
++	unsigned long flags;
++	u32 bl_put, el_put;
++	s32 owed;
++	int held = 0, n = 0, i;
++
++	if (!bl_provider || !dvel_put_count(bl_provider, &bl_put) ||
++	    !dvel_put_count("dveldec", &el_put))
++		return;
++
++	spin_lock_irqsave(&amdv_lock, flags);
++	/* Coming back from BLs that were deliberately not paired (the EL was
++	 * bypassed): those BL returns are not owed ELs. Start counting afresh.
++	 */
++	if (dvel_put_rebase) {
++		dvel_put_base = (s32)(bl_put - el_put);
++		dvel_put_rebase = false;
++	}
++	for (i = 0; i < ARRAY_SIZE(dvel_miss_bl); i++)
++		if (dvel_miss_bl[i] && dvel_miss_bl[i] != bl)
++			held++;
++	owed = (s32)(bl_put - el_put) - dvel_put_base + held;
++	spin_unlock_irqrestore(&amdv_lock, flags);
++
++	while (owed > 0 && n < DVEL_RETIRE_MAX && dvel_vf_peek()) {
++		struct vframe_s *el = dvel_vf_get();
++
++		if (!el)
++			break;
++		dvel_vf_put(el);
++		owed--;
++		n++;
++	}
++	if (n) {
++		dvel_retire_count += n;
++		pr_info_ratelimited("dvel: bl put %u el put %u held %d - retired %d stale el\n",
++			bl_put, el_put, held, n);
++	}
++}
++
+ static struct vframe_s *dv_vf[16][2];
+ static void *metadata_parser;
+ static bool metadata_parser_reset_flag;
+@@ -2252,6 +2411,7 @@
+ 		crc_bypass_count = 0;
+ 		amdv_el_disable = 0;
+ 	}
++	dvel_miss_reset_locked();
+ 	vfm_path_on = false;
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+ 
+@@ -2292,6 +2452,7 @@
+ 		crc_bypass_count = 0;
+ 		amdv_el_disable = 0;
+ 	}
++	dvel_miss_reset_locked();
+ 	vfm_path_on = true;
+ 	spin_unlock_irqrestore(&amdv_lock, flags);
+ }
+@@ -2314,6 +2475,7 @@
+ 			pr_dv_dbg("%s, provider %s registered\n",
+ 				__func__, provider_name);
+ 		dv_vf_light_reg_provider();
++		dvel_put_baseline();
+ 	}
+ 	return 0;
+ }
+@@ -5147,6 +5309,7 @@
+ 		return;
+ 
+ 	spin_lock_irqsave(&amdv_lock, flags);
++	dvel_miss_put_locked(vf);
+ 	if (multi_dv_mode) {
+ 		if (vf && dv_inst_valid(vf->src_fmt.dv_id))
+ 			dv_id = vf->src_fmt.dv_id;
+@@ -9708,6 +9871,7 @@
+ 	bool el_flag = 0;
+ 	bool el_halfsize_flag = 1;
+ 	bool el_missing = false;
++	bool dec_el_exist = false;
+ 	u32 w = 0xffff;
+ 	u32 h = 0xffff;
+ 	int meta_flag_bl = 1;
+@@ -9826,6 +9990,7 @@
+ 				}
+ 			}
+ 		}
++		dec_el_exist = req.dv_enhance_exist;
+ 		if (debug_dolby & 1)
+ 			pr_dv_dbg("[inst%d vd%d]%s get %p(%d,index %d),fmt %d,aux %p %x,el %d\n",
+ 				     dv_id + 1,
+@@ -10012,6 +10177,8 @@
+ 		dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
+ 		if (req.dv_enhance_exist && toggle_mode == 1 &&
+ 		    dvel_provider && !strcmp(dvel_provider, "dveldec")) {
++			if (!strcmp(dv_provider[vd_path], "dvbldec"))
++				dvel_retire_owed(dv_provider[vd_path], vf);
+ 			el_vf = dvel_vf_get();
+ 			if (el_vf &&  (el_vf->pts_us64 == vf->pts_us64 ||
+ 			    !(dolby_vision_flags & FLAG_CHECK_ES_PTS))) {
+@@ -10066,6 +10233,7 @@
+ 						 el_req.aux_size);
+ 				}
+ 				amdvdolby_vision_vf_add(vf, el_vf);
++				dvel_note_miss(vf, false, false);
+ 				el_flag = 1;
+ 				if (vf->width == el_vf->width)
+ 					el_halfsize_flag = 0;
+@@ -10079,12 +10247,28 @@
+ 					("bl(%p-%lld) not found el(%p-%lld)\n",
+ 					 vf, vf->pts_us64,
+ 					 el_vf, el_vf->pts_us64);
++				/* Its EL is owed from now on: dvel_retire_owed()
++				 * counts this BL until it is put.
++				 */
++				if (!el_vf)
++					dvel_note_miss(vf, true, true);
+ 			}
+ 		} else if (toggle_mode == 1) {
+ 			if (debug_dolby & 2)
+ 				pr_dv_dbg("+++ get bl(%p-%lld) +++\n",
+ 					     vf, vf->pts_us64);
+ 			amdvdolby_vision_vf_add(vf, NULL);
++			/* No EL is paired with this BL. If the decoder produced one
++			 * (amdv bypassed it), that EL is owed like a miss; if the
++			 * decoder produced none, nothing is owed and the BL returns
++			 * that follow are not ELs to retire.
++			 */
++			dvel_provider = vf_get_provider_name(DVEL_RECV_NAME);
++			if (dec_el_exist && dvel_provider &&
++			    !strcmp(dvel_provider, "dveldec"))
++				dvel_note_miss(vf, true, false);
++			else
++				dvel_put_rebase = true;
+ 		}
+ 
+ 		/* This picture was supposed to have an enhancement layer and did
+diff -ru a/drivers/media/video_sink/video.c b/drivers/media/video_sink/video.c
+--- a/drivers/media/video_sink/video.c	2026-09-21 10:31:45.000000000 -0400
++++ b/drivers/media/video_sink/video.c	2026-09-27 22:11:15.326507056 -0400
+@@ -973,14 +973,21 @@
+ 
+ 	vpp_trace_vframe("video_vf_put",
+ 		(void *)vf, vf->type, vf->flag, 0, vsync_cnt[VPP0]);
++#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
++	/* Not gated on is_amdv_enable(): a BL paired while amdv was on and put
++	 * while it is off (a DV mode switch, a display reset) would otherwise
++	 * strand its EL in the dv_vf table, never returned to the EL decoder.
++	 * With no table entry for this vf the call is a lookup and nothing else.
++	 * Ahead of the BL's own put so the EL put total never trails the BL's:
++	 * the EL queue realignment in amdv reads both, and a surplus of BL returns
++	 * is read as owed ELs.
++	 */
++	amdv_vf_put(vf);
++#endif
+ 	if (vf_put(vf, RECEIVER_NAME) < 0)
+ 		return -EFAULT;
+ 	if (IS_DI_POSTWRTIE(vf->type))
+ 		put_di_count++;
+-#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+-		if (is_amdv_enable())
+-			amdv_vf_put(vf);
+-#endif
+ 	video_notify_flag |= VIDEO_NOTIFY_PROVIDER_PUT;
+ 
+ 	return 0;
