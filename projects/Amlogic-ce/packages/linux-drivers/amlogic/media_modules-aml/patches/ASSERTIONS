@@ -3,7 +3,7 @@
 # `patch` exiting 0 does not prove a hunk arrived; see common_drivers/patches/ASSERTIONS.
 # Format:  <path relative to the source root>:<literal string>:<exact count>
 
-# --- 0001: video pts check-in at the written offset (CoreELEC/media_modules-aml PR #10) ---
+# --- video pts check-in at the written offset: our former 0001, upstream since c15aebb1 (still asserted) ---
 drivers/stream_input/amports/amstream.c:static u32 vbuf_checkin_offset(struct stream_buf_s *vbuf):1
 drivers/stream_input/amports/amstream.c:return threadrw_dataoffset(vbuf);:1
 drivers/stream_input/amports/amstream.c:vbuf_checkin_offset(vbuf), :3
