@@ -136,7 +136,7 @@ libbluray 1.5.1 and master.
          AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -350,14 +406,22 @@
+@@ -350,14 +406,35 @@
              int fromState = state;
              int toState;
              boolean ret;
@@ -146,6 +146,19 @@ libbluray 1.5.1 and master.
 +            boolean hiddenDone = cmd.isHidden() && (state == LOADED || state == PAUSED);
 +            if (hiddenDone)
 +                fromState = NOT_LOADED;
++            /* After a hidden load the application believes the xlet LOADED while
++             * the loader has it PAUSED: its own init() is then the LOADED->PAUSED
++             * a player would report, already done, and start() starts from the
++             * LOADED it was shown. */
++            boolean wasLoadedView = loadedView;
++            if (wasLoadedView && state == PAUSED) {
++                if (cmd.getCommand() == AppCommand.CMD_INIT) {
++                    fromState = LOADED;
++                    hiddenDone = true;
++                } else if (cmd.getCommand() == AppCommand.CMD_START) {
++                    fromState = LOADED;
++                }
++            }
 +            /* any command other than a hidden load ends the LOADED view */
 +            loadedView = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;
              switch (cmd.getCommand()) {
@@ -161,7 +174,7 @@ libbluray 1.5.1 and master.
                  break;
              case AppCommand.CMD_START:
                  toState = STARTED;
-@@ -377,11 +441,13 @@
+@@ -377,11 +454,13 @@
                  ret = doResume();
                  break;
              case AppCommand.CMD_NOTIFY_DESTROYED:
@@ -175,7 +188,7 @@ libbluray 1.5.1 and master.
                  toState = PAUSED;
                  state = PAUSED;
                  ret = true;
-@@ -389,7 +455,12 @@
+@@ -389,7 +468,12 @@
              default:
                  return;
              }
@@ -189,7 +202,7 @@ libbluray 1.5.1 and master.
              cmd.release();
              if (state == DESTROYED)
                  state = NOT_LOADED;
-@@ -398,7 +469,10 @@
+@@ -398,7 +482,10 @@
  
      private BDJXletContext context;
      private Xlet xlet;
@@ -201,7 +214,7 @@ libbluray 1.5.1 and master.
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -431,6 +505,22 @@
+@@ -431,6 +518,22 @@
              return arg;
          }
  
@@ -224,7 +237,7 @@ libbluray 1.5.1 and master.
          public boolean waitDone(int timeoutMs) {
              synchronized (this) {
                  while (!done) {
-@@ -466,6 +556,8 @@
+@@ -466,6 +569,8 @@
  
          private int cmd;
          private Object arg;

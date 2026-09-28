@@ -90,22 +90,29 @@ parameter re-runs the csc process on the next frame, like hdr_policy.
  	enum hdr_process_sel hdr_process_select, enum vpp_index_e vpp_index);
 --- a/drivers/media/enhancement/amvecm/amcsc.c
 +++ b/drivers/media/enhancement/amvecm/amcsc.c
-@@ -541,6 +541,10 @@
+@@ -541,6 +541,7 @@
  static uint primary_policy;
  #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
  static uint cur_primary_policy;
 +static uint cur_osd_pq_passthrough;
-+/* osd_pq_passthrough as sampled for this update: compared and stored from one
-+ * read, so a change written between them is seen again next time */
-+static uint osd_pq_pass_sampled;
  #endif
  module_param(primary_policy, uint, 0664);
  MODULE_PARM_DESC(primary_policy, "\n current primary_policy\n");
-@@ -8873,6 +8877,14 @@
+@@ -8780,6 +8781,10 @@
+ 	static struct hdr10plus_para *para;
+ 	static int signal_change_latch;
+ 	int i, k;
++	/* osd_pq_passthrough sampled once for this update: the change check and
++	 * the store of cur_osd_pq_passthrough (in different blocks below) use the
++	 * same read, so a change written in between is seen again next time */
++	uint osd_pq_pass_sampled = READ_ONCE(osd_pq_passthrough);
+ 
+ 	if (!vinfo || vinfo->mode == VMODE_NULL ||
+ 	    vinfo->mode == VMODE_INVALID)
+@@ -8873,6 +8878,13 @@
  			signal_change_flag |= SIG_HDR_MODE;
  		}
  
-+		osd_pq_pass_sampled = READ_ONCE(osd_pq_passthrough);
 +		if (osd_pq_pass_sampled != cur_osd_pq_passthrough) {
 +			pr_csc(4, "osd pq passthrough changed from %d to %d.\n",
 +			       cur_osd_pq_passthrough,

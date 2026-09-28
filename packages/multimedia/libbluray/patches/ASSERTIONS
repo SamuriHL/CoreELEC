@@ -21,10 +21,17 @@ src/libbluray/bdnav/clpi_parse.c:spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + e
 # 03 BD-J jar search fallback
 src/libbluray/bdj/bdj.c:BD_DEBUG(DBG_BDJ, "searching for "BDJ_JARFILE" ...\n");:1
 # 04 DV EL windowed seek recovery
-src/libbluray/bluray.c:el_recover_end_pkt:9
+src/libbluray/bluray.c:el_recover_end_pkt:8
+src/libbluray/bluray.c:_init_el_recover(st, clip_pkt);:1
+src/libbluray/bluray.c:_init_el_recover(st, st->clip->start_pkt);:1
+src/libbluray/bluray.c:_clip_dv_el_pid(st->clip));:1
+src/libbluray/decoders/m2ts_filter.c:if (el_pid > HDMV_PID_VIDEO + num_video - 1 && el_pid < HDMV_PID_AUDIO_FIRST) {:1
+src/libbluray/bluray.c:return (uint64_t)clip_pkt * 192;:1
+src/libbluray/decoders/m2ts_filter.c:num_pg + 2, sizeof(uint16_t));:2
 # 05 selectLanguage returns on success
 src/libbluray/bdj/java/org/videolan/media/content/playlist/StreamControl.java:                    return;:1
 # 06 playitem connection_condition
+src/libbluray/bluray.c:ci->connection_condition = pi->connection_condition;:1
 src/libbluray/bluray.h:connection_condition:2
 # 07 BD-J background plane + idle query
 src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java:import org.videolan.BDJXletContext;:1
@@ -39,10 +46,17 @@ src/libbluray/bdj/java/org/videolan/media/content/playlist/VideoControl.java:Dim
 # 12 PlayItem components per stream type
 src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java:StreamInfo[] audio = clip.getAudioStreams();:1
 # 13 BD-J timing notifications at presentation time
+src/libbluray/bluray.c:v = bd->bdj_pt_playitem;:1
+src/libbluray/bluray.c:bd->bdj_pt_playitem_valid = 1;:2
+src/libbluray/bluray.c:_write_time_psr(bd, clip, clip->in_time);:1
+src/libbluray/bluray.c:_write_time_psr(bd, bd->st0.clip, time);:1
 src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_tell_time(bd);:1
 src/libbluray/bluray.c:_bdj_pt_release(bd, :8
 src/libbluray/bluray.c:bd->bdj_pt_releasing = 1;:1
 # 14 PRESENT xlets stay NOT_LOADED until started
+src/libbluray/bdj/java/org/videolan/BDJLoader.java:proxys[i].initPresent();:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:loadedView = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean wasLoadedView = loadedView;:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean presentOnly = false;:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:4
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit();:6
@@ -51,6 +65,3 @@ src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (presentOnly && (s == LOADED || s == PAUSED)):1
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:NPTRate(int numerator, int denominator) {:1
-src/libbluray/bluray.c:bd->bdj_pt_playitem_valid = 1;:1
-src/libbluray/bluray.c:static void _el_note_clip_end(BD_STREAM *st):1
-src/libbluray/bluray.c:_el_note_clip_end(st);:3

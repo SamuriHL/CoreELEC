@@ -124,7 +124,7 @@ drivers/media/enhancement/amvecm/set_hdr2_v0.c:module_param(osd_pq_passthrough, 
 drivers/media/enhancement/amvecm/set_hdr2_v0.c:osd_pq_pass = true;:1
 drivers/media/enhancement/amvecm/set_hdr2_v0.c:rgb2ycbcr_ncl2020 : rgb2ycbcr_709;:1
 drivers/media/enhancement/amvecm/set_hdr2_v0.c:if ((hdr_process_select & HDR_BYPASS) && !osd_pq_pass):1
-drivers/media/enhancement/amvecm/amcsc.c:osd_pq_pass_sampled = READ_ONCE(osd_pq_passthrough);:1
+drivers/media/enhancement/amvecm/amcsc.c:uint osd_pq_pass_sampled = READ_ONCE(osd_pq_passthrough);:1
 drivers/media/enhancement/amvecm/amcsc.c:if (osd_pq_pass_sampled != cur_osd_pq_passthrough) {:1
 drivers/media/enhancement/amvecm/amcsc.c:cur_osd_pq_passthrough = osd_pq_pass_sampled;:1
 

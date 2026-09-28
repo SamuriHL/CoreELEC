@@ -10,14 +10,17 @@ no parameter sets and FEL composition renders black. Rewind delivery
 by up to 768 kB on clips that declare a second in-mux HEVC video PID,
 passing only system packets and the EL PID (rest wiped to padding).
 
-Not where a playitem continues the same clip from exactly where the reader
-just finished the previous one (consecutive non-seamless playitems over one
-clip): those packets, EL access unit included, were already delivered, and
-rewinding would hand the demuxer duplicate EL access units.
+The EL PID is also cut at the playitem's in/out time by the m2ts filter,
+exactly like the base layer: it is not in the STN video list, so stock
+libbluray passed every EL access unit before the in time (a non-seamless
+playitem starting inside a clip re-reads the previous playitem's tail, and
+the recovery rewind reaches further back) and the demuxer got duplicate EL
+access units with no base layer to pair with. The target frame's EL IRAP,
+at the in time, is kept.
 ---
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
-@@ -90,6 +90,24 @@
+@@ -90,6 +90,16 @@
      uint8_t         encrypted_block_cnt;
      uint8_t         seek_flag;  /* used to fine-tune first read after seek */
  
@@ -30,19 +33,11 @@ rewinding would hand the demuxer duplicate EL access units.
 +     * el_recover_end_pkt == 0 -> inactive. */
 +    uint32_t        el_recover_end_pkt;
 +    uint16_t        el_recover_pid;
-+    /* the clip the reader just played to the END of its playitem, and that
-+     * end: a playitem that continues the same clip from exactly there was
-+     * preceded by the packets the recovery would rewind into, EL access unit
-+     * included, so it must not deliver them a second time. Set only where the
-+     * reader advances past a clip end it reached (_el_note_clip_end); every
-+     * open consumes it, so a seek, stop or new playlist never counts. */
-+    char            el_last_clip[11];
-+    uint32_t        el_last_end_pkt;
 +
      M2TS_FILTER    *m2ts_filter;
  } BD_STREAM;
  
-@@ -648,6 +666,60 @@
+@@ -648,6 +658,51 @@
      m2ts_filter_close(&st->m2ts_filter);
  }
  
@@ -91,38 +86,30 @@ rewinding would hand the demuxer duplicate EL access units.
 +    }
 +}
 +
-+static void _el_note_clip_end(BD_STREAM *st)
-+{
-+    if (st->clip) {
-+        memcpy(st->el_last_clip, st->clip->name, sizeof(st->el_last_clip));
-+        st->el_last_clip[sizeof(st->el_last_clip) - 1] = 0;
-+        st->el_last_end_pkt = st->clip->end_pkt;
-+    }
-+}
-+
  static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
  {
      _close_m2ts(st);
-@@ -661,6 +733,18 @@
+@@ -661,6 +716,9 @@
      st->clip_size = 0;
      st->clip_pos = (uint64_t)st->clip->start_pkt * 192;
      st->clip_block_pos = (st->clip_pos / 6144) * 6144;
 +    if (st == &bd->st0) {
-+        const int contiguous = st->el_last_clip[0] &&
-+                               !strcmp(st->el_last_clip, st->clip->name) &&
-+                               st->el_last_end_pkt == st->clip->start_pkt;
-+        if (contiguous) {
-+            st->el_recover_end_pkt = 0;
-+        } else {
-+            _init_el_recover(st, st->clip->start_pkt);
-+        }
-+        /* consumed: only a natural advance past a clip end sets it again */
-+        st->el_last_clip[0] = 0;
++        _init_el_recover(st, st->clip->start_pkt);
 +    }
      st->eof_hit = 0;
      st->encrypted_block_cnt = 0;
  
-@@ -798,6 +882,28 @@
+@@ -688,7 +746,8 @@
+                 st->m2ts_filter = m2ts_filter_init((int64_t)st->clip->in_time << 1,
+                                                    (int64_t)st->clip->out_time << 1,
+                                                    stn->num_video, stn->num_audio,
+-                                                   stn->num_ig, stn->num_pg);
++                                                   stn->num_ig, stn->num_pg,
++                                                   _clip_dv_el_pid(st->clip));
+ 
+                 _update_clip_psrs(bd, st->clip);
+ 
+@@ -798,6 +857,28 @@
                      }
                  }
  
@@ -151,7 +138,7 @@ rewinding would hand the demuxer duplicate EL access units.
                  BD_DEBUG(DBG_STREAM, "Read unit OK!\n");
  
  #ifdef BLURAY_READ_ERROR_TEST
-@@ -922,6 +1028,10 @@
+@@ -922,6 +1003,10 @@
      st->clip_pos = (uint64_t)clip_pkt * 192;
      st->clip_block_pos = (st->clip_pos / 6144) * 6144;
  
@@ -162,7 +149,7 @@ rewinding would hand the demuxer duplicate EL access units.
      if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
          BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to seek clip %s!\n", st->clip->name);
      }
-@@ -929,7 +1039,7 @@
+@@ -929,7 +1014,7 @@
      st->int_buf_off = 6144;
      st->seek_flag = 1;
  
@@ -171,27 +158,59 @@ rewinding would hand the demuxer duplicate EL access units.
  }
  
  /*
-@@ -2045,6 +2155,7 @@
-             if (bd->seamless_angle_change) {
-                 if (clip_pkt >= bd->angle_change_pkt) {
-                     if (clip_pkt >= st->clip->end_pkt) {
-+                        _el_note_clip_end(st);
-                         st->clip = nav_next_clip(bd->title, st->clip);
-                         if (!_open_m2ts(bd, st)) {
-                             return -1;
-@@ -2087,6 +2198,7 @@
-                     }
+--- a/src/libbluray/decoders/m2ts_filter.c
++++ b/src/libbluray/decoders/m2ts_filter.c
+@@ -56,7 +56,8 @@
  
-                     // find next clip
-+                    _el_note_clip_end(st);
-                     st->clip = nav_next_clip(bd->title, st->clip);
-                     if (st->clip == NULL) {
-                         BD_DEBUG(DBG_BLURAY | DBG_STREAM, "End of title\n");
-@@ -2222,6 +2334,7 @@
+ M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
+                               unsigned num_video, unsigned num_audio,
+-                              unsigned num_ig, unsigned num_pg)
++                              unsigned num_ig, unsigned num_pg,
++                              uint16_t el_pid)
+ {
+     M2TS_FILTER *p = calloc(1, sizeof(*p));
  
-     if (st->clip) {
-         if (st->clip->still_mode == BLURAY_STILL_TIME) {
-+            _el_note_clip_end(st);
-             st->clip = nav_next_clip(bd->title, st->clip);
-             if (st->clip) {
-                 ret = _open_m2ts(bd, st);
+@@ -66,8 +67,8 @@
+ 
+         p->in_pts   = in_pts;
+         p->out_pts  = out_pts;
+-        p->wipe_pid = calloc(num_audio + num_video + num_ig + num_pg + 1, sizeof(uint16_t));
+-        p->pass_pid = calloc(num_audio + num_video + num_ig + num_pg + 1, sizeof(uint16_t));
++        p->wipe_pid = calloc(num_audio + num_video + num_ig + num_pg + 2, sizeof(uint16_t));
++        p->pass_pid = calloc(num_audio + num_video + num_ig + num_pg + 2, sizeof(uint16_t));
+         if (!p->pass_pid || !p->wipe_pid) {
+             m2ts_filter_close(&p);
+             return NULL;
+@@ -78,6 +79,16 @@
+         for (ii = 0, npid = 0; ii < num_video; ii++) {
+             pid[npid++] = HDMV_PID_VIDEO + ii;
+         }
++        /* The Dolby Vision enhancement layer is cut at the playitem's in/out
++         * time exactly like the base layer it belongs to. It is not in the
++         * STN video list, so without this every EL access unit before the in
++         * time (a non-seamless playitem starting inside a clip: the previous
++         * playitem's tail, or the DV EL recovery rewind) reached the demuxer
++         * as a duplicate with no base layer to pair with. Kept sorted: the
++         * EL PID (0x1012..0x101f) follows the base video PIDs. */
++        if (el_pid > HDMV_PID_VIDEO + num_video - 1 && el_pid < HDMV_PID_AUDIO_FIRST) {
++            pid[npid++] = el_pid;
++        }
+         for (ii = 0; ii < num_audio; ii++) {
+             pid[npid++] = HDMV_PID_AUDIO_FIRST + ii;
+         }
+--- a/src/libbluray/decoders/m2ts_filter.h
++++ b/src/libbluray/decoders/m2ts_filter.h
+@@ -31,9 +31,12 @@
+ 
+ typedef struct m2ts_filter_s M2TS_FILTER;
+ 
++/* el_pid: an in-mux Dolby Vision enhancement-layer video PID to gate with the
++ * base layer (0 = none) */
+ BD_PRIVATE M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
+                                          unsigned num_video, unsigned num_audio,
+-                                         unsigned num_ig, unsigned num_pg);
++                                         unsigned num_ig, unsigned num_pg,
++                                         uint16_t el_pid);
+ BD_PRIVATE void         m2ts_filter_close(M2TS_FILTER **);
+ 
+ /*
