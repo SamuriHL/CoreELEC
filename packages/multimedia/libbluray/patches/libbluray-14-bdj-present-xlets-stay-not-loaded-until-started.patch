@@ -139,7 +139,7 @@ libbluray 1.5.1 and master.
              switch (cmd.getCommand()) {
              case AppCommand.CMD_LOAD:
                  toState = LOADED;
-@@ -389,16 +456,129 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -389,16 +456,135 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              default:
                  return;
              }
@@ -152,9 +152,9 @@ libbluray 1.5.1 and master.
                  state = NOT_LOADED;
 +            if (maskedFrom >= 0)
 +                endHeldNotify(cmd.getCommand() == AppCommand.CMD_START, replayAt);
-         }
-     }
- 
++        }
++    }
++
 +    /* notifications record the mask they were sent under */
 +    private void tagMaskEpoch(AppCommand cmd) {
 +        boolean m = masked;             /* masked first: maskEpoch is bumped before it */
@@ -184,9 +184,9 @@ libbluray 1.5.1 and master.
 +                    cmds.add(at + i, c);
 +            }
 +            cmds.notifyAll();
-+        }
-+    }
-+
+         }
+     }
+ 
 +    /* A command on a masked xlet, answered from the state applications were
 +     * shown with stock semantics (see the do*() methods): the loader's init
 +     * already did the work a load or init would. Commands that move the xlet
@@ -218,10 +218,16 @@ libbluray 1.5.1 and master.
 +            /* done by the loader's init, or failed there as it would here */
 +            to = PAUSED;
 +            ret = (state == PAUSED);
++            /* stock queues initXlet's notifications behind what is queued
++             * now - ahead of anything a listener queues on this event */
++            int at;
++            synchronized (cmds) {
++                at = cmds.size();
++            }
 +            masked = false;
 +            notifyListeners(from, to, !ret);
 +            cmd.release();
-+            endHeldNotify(true, -1);    /* stock: behind what is queued */
++            endHeldNotify(true, at);
 +            return true;
 +        case AppCommand.CMD_STOP:
 +            to = DESTROYED;
@@ -270,7 +276,7 @@ libbluray 1.5.1 and master.
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -464,8 +644,26 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -464,8 +650,26 @@ class BDJAppProxy implements DVBJProxy, Runnable {
          public static final int CMD_NOTIFY_DESTROYED = 6;
          public static final int CMD_NOTIFY_PAUSED = 7;
  
