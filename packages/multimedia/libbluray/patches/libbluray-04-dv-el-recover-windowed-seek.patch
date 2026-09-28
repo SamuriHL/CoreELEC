@@ -9,11 +9,15 @@ SPN, cutting off the enhancement-layer access unit of the target frame
 no parameter sets and FEL composition renders black. Rewind delivery
 by up to 768 kB on clips that declare a second in-mux HEVC video PID,
 passing only system packets and the EL PID (rest wiped to padding).
+
+Not where a playitem continues the same clip from exactly where the reader
+just finished the previous one (consecutive non-seamless playitems over one
+clip): those packets, EL access unit included, were already delivered, and
+rewinding would hand the demuxer duplicate EL access units.
 ---
-diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
-@@ -90,6 +90,16 @@
+@@ -90,6 +90,24 @@
      uint8_t         encrypted_block_cnt;
      uint8_t         seek_flag;  /* used to fine-tune first read after seek */
  
@@ -26,11 +30,19 @@ diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +     * el_recover_end_pkt == 0 -> inactive. */
 +    uint32_t        el_recover_end_pkt;
 +    uint16_t        el_recover_pid;
++    /* the clip the reader just played to the END of its playitem, and that
++     * end: a playitem that continues the same clip from exactly there was
++     * preceded by the packets the recovery would rewind into, EL access unit
++     * included, so it must not deliver them a second time. Set only where the
++     * reader advances past a clip end it reached (_el_note_clip_end); every
++     * open consumes it, so a seek, stop or new playlist never counts. */
++    char            el_last_clip[11];
++    uint32_t        el_last_end_pkt;
 +
      M2TS_FILTER    *m2ts_filter;
  } BD_STREAM;
  
-@@ -648,6 +658,51 @@
+@@ -648,6 +666,60 @@
      m2ts_filter_close(&st->m2ts_filter);
  }
  
@@ -79,20 +91,38 @@ diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +    }
 +}
 +
++static void _el_note_clip_end(BD_STREAM *st)
++{
++    if (st->clip) {
++        memcpy(st->el_last_clip, st->clip->name, sizeof(st->el_last_clip));
++        st->el_last_clip[sizeof(st->el_last_clip) - 1] = 0;
++        st->el_last_end_pkt = st->clip->end_pkt;
++    }
++}
++
  static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
  {
      _close_m2ts(st);
-@@ -661,6 +716,9 @@
+@@ -661,6 +733,18 @@
      st->clip_size = 0;
      st->clip_pos = (uint64_t)st->clip->start_pkt * 192;
      st->clip_block_pos = (st->clip_pos / 6144) * 6144;
 +    if (st == &bd->st0) {
-+        _init_el_recover(st, st->clip->start_pkt);
++        const int contiguous = st->el_last_clip[0] &&
++                               !strcmp(st->el_last_clip, st->clip->name) &&
++                               st->el_last_end_pkt == st->clip->start_pkt;
++        if (contiguous) {
++            st->el_recover_end_pkt = 0;
++        } else {
++            _init_el_recover(st, st->clip->start_pkt);
++        }
++        /* consumed: only a natural advance past a clip end sets it again */
++        st->el_last_clip[0] = 0;
 +    }
      st->eof_hit = 0;
      st->encrypted_block_cnt = 0;
  
-@@ -798,6 +856,28 @@
+@@ -798,6 +882,28 @@
                      }
                  }
  
@@ -121,7 +151,7 @@ diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
                  BD_DEBUG(DBG_STREAM, "Read unit OK!\n");
  
  #ifdef BLURAY_READ_ERROR_TEST
-@@ -922,6 +1002,10 @@
+@@ -922,6 +1028,10 @@
      st->clip_pos = (uint64_t)clip_pkt * 192;
      st->clip_block_pos = (st->clip_pos / 6144) * 6144;
  
@@ -132,7 +162,7 @@ diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
      if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
          BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to seek clip %s!\n", st->clip->name);
      }
-@@ -929,7 +1013,7 @@
+@@ -929,7 +1039,7 @@
      st->int_buf_off = 6144;
      st->seek_flag = 1;
  
@@ -141,3 +171,27 @@ diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
  }
  
  /*
+@@ -2045,6 +2155,7 @@
+             if (bd->seamless_angle_change) {
+                 if (clip_pkt >= bd->angle_change_pkt) {
+                     if (clip_pkt >= st->clip->end_pkt) {
++                        _el_note_clip_end(st);
+                         st->clip = nav_next_clip(bd->title, st->clip);
+                         if (!_open_m2ts(bd, st)) {
+                             return -1;
+@@ -2087,6 +2198,7 @@
+                     }
+ 
+                     // find next clip
++                    _el_note_clip_end(st);
+                     st->clip = nav_next_clip(bd->title, st->clip);
+                     if (st->clip == NULL) {
+                         BD_DEBUG(DBG_BLURAY | DBG_STREAM, "End of title\n");
+@@ -2222,6 +2334,7 @@
+ 
+     if (st->clip) {
+         if (st->clip->still_mode == BLURAY_STILL_TIME) {
++            _el_note_clip_end(st);
+             st->clip = nav_next_clip(bd->title, st->clip);
+             if (st->clip) {
+                 ret = _open_m2ts(bd, st);

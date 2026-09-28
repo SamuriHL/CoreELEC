@@ -18,16 +18,25 @@ collapse). The player stamps bd_bdj_pending_seq() with its read position
 and calls bd_bdj_release() when the picture reaches it. The application's
 media clock (Libbluray.tellTime) reports the presented position.
 
+PSR 5 (chapter) and 7 (playitem) are still WRITTEN at read time - the
+reader, the graphics controller and the player's own BD_EVENT_PLAYITEM and
+BD_EVENT_CHAPTER depend on that - but while notifications are held the
+application reads their presented values (the last PLAYITEM/CHAPTER event
+released to it), so PSR 5/7 stay consistent with the held PSR 8 instead of a
+whole playitem ahead of it.
+
 Unchanged: HDMV titles, user input, register writes by the application,
-rate changes. Everything held is released first on a seek, a playlist
+rate changes, and the stream-number PSRs the reader validates when a clip
+opens (audio, PG, IG): those drive the reader's own stream handling and only
+change where a clip's STN table differs, so the application sees such a change
+up to the read-ahead early. Everything held is released first on a seek, a playlist
 close and a BD-J start/stop/close, so a mixed disc's HDMV title reads the
 registers the application actually saw. Disabled by default; a player
 that never enables it gets libbluray's existing behaviour.
 
 ---
-diff -ruN a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
---- a/src/libbluray/bdj/native/org_videolan_Libbluray.c	2026-09-26 14:38:10.624086834 -0400
-+++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c	2026-09-26 14:38:57.517900702 -0400
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.c
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c
 @@ -335,7 +335,7 @@
  JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
          jclass cls, jlong np) {
@@ -37,10 +46,9 @@ diff -ruN a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bd
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
-diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
---- a/src/libbluray/bluray.c	2026-09-26 14:38:10.611589796 -0400
-+++ b/src/libbluray/bluray.c	2026-09-26 14:38:57.517560391 -0400
-@@ -155,6 +155,27 @@
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -155,6 +155,35 @@
       */
      uint8_t         end_of_playlist; /* 1 - reached. 3 - processed . */
      uint8_t         app_scr;         /* 1 if application provides presentation timetamps */
@@ -57,6 +65,14 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +    uint8_t         bdj_pt_presented_valid;
 +    uint32_t        bdj_pt_seq;
 +    uint64_t        bdj_pt_presented_time; /* title time, 1/90000 s */
++    /* PSR 5 (chapter) and 7 (playitem) as presented. The registers themselves
++     * are written at read time - the reader, the graphics controller and the
++     * player's own BD_EVENT_PLAYITEM/CHAPTER depend on that - so while
++     * notifications are held, the application reads these instead
++     * (bdpriv_reg_read), keeping PSR 5/7 consistent with the held PSR 8 and
++     * PLAYITEM/CHAPTER events rather than a whole playitem ahead of them. */
++    uint8_t         bdj_pt_playitem_valid, bdj_pt_chapter_valid;
++    uint32_t        bdj_pt_playitem, bdj_pt_chapter;
 +    unsigned        bdj_pt_head, bdj_pt_count;
 +    struct {
 +        uint32_t seq;
@@ -68,7 +84,7 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
      uint8_t         uo_restriction_level; /* 0 to ignore UO restrictions */
  
      /* HDMV */
-@@ -273,6 +294,25 @@
+@@ -273,6 +302,25 @@
   * PSR utils
   */
  
@@ -94,7 +110,7 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
  static void _update_time_psr(BLURAY *bd, uint32_t time)
  {
      /*
-@@ -293,7 +333,7 @@
+@@ -293,7 +341,7 @@
          return;
      }
  
@@ -103,7 +119,7 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
  }
  
  static uint32_t _update_time_psr_from_stream(BLURAY *bd)
-@@ -376,7 +416,7 @@
+@@ -376,7 +424,7 @@
      uint32_t psr_val;
  
      bd_psr_write(bd->regs, PSR_PLAYITEM, clip->ref);
@@ -112,12 +128,40 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
  
      /* Validate selected audio, subtitle and IG stream PSRs */
      if (stn->num_audio) {
-@@ -1556,12 +1596,98 @@
+@@ -1407,6 +1455,25 @@
+ uint32_t bdpriv_reg_read(BLURAY *bd, int psr, int reg)
+ {
+     if (psr) {
++        /* the application's view of the playback position (see bdj_pt_playitem) */
++        if (reg == PSR_PLAYITEM || reg == PSR_CHAPTER) {
++            int held = 0;
++            uint32_t v = 0;
++            bd_mutex_lock(&bd->mutex);
++            if (bd->bdj_pt_count > 0 && bd->bdj_pt_enabled && bd->title_type == title_bdj) {
++                if (reg == PSR_PLAYITEM && bd->bdj_pt_playitem_valid) {
++                    v = bd->bdj_pt_playitem;
++                    held = 1;
++                } else if (reg == PSR_CHAPTER && bd->bdj_pt_chapter_valid) {
++                    v = bd->bdj_pt_chapter;
++                    held = 1;
++                }
++            }
++            bd_mutex_unlock(&bd->mutex);
++            if (held) {
++                return v;
++            }
++        }
+         return bd_psr_read(bd->regs, reg);
+     } else {
+         return bd_gpr_read(bd->regs, reg);
+@@ -1556,12 +1623,109 @@
          }
      }
  
 +    _bdj_pt_release(bd, 0, 1);
 +    bd->bdj_pt_presented_valid = 0;
++    bd->bdj_pt_playitem_valid = 0;
++    bd->bdj_pt_chapter_valid = 0;
      return !bdj_process_event(bd->bdjava, BDJ_EVENT_START, title);
  }
  
@@ -135,8 +179,17 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +        bd->bdj_pt_presented_valid = 1;
 +        /* the write callback delivers BDJ_EVENT_PTS */
 +        bd_psr_write(bd->regs, PSR_TIME, bd->bdj_pt_queue[idx].param);
-+    } else if (bd->bdjava != NULL) {
-+        bdj_process_event(bd->bdjava, bd->bdj_pt_queue[idx].ev, bd->bdj_pt_queue[idx].param);
++    } else {
++        if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_PLAYITEM) {
++            bd->bdj_pt_playitem       = bd->bdj_pt_queue[idx].param;
++            bd->bdj_pt_playitem_valid = 1;
++        } else if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_CHAPTER) {
++            bd->bdj_pt_chapter       = bd->bdj_pt_queue[idx].param;
++            bd->bdj_pt_chapter_valid = 1;
++        }
++        if (bd->bdjava != NULL) {
++            bdj_process_event(bd->bdjava, bd->bdj_pt_queue[idx].ev, bd->bdj_pt_queue[idx].param);
++        }
 +    }
 +    bd->bdj_pt_releasing = 0;
 +}
@@ -211,16 +264,18 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
          return bdj_process_event(bd->bdjava, ev, param);
      }
      return -1;
-@@ -1569,6 +1695,8 @@
+@@ -1569,6 +1733,10 @@
  
  static void _stop_bdj(BLURAY *bd)
  {
 +    _bdj_pt_release(bd, 0, 1);
 +    bd->bdj_pt_presented_valid = 0;
++    bd->bdj_pt_playitem_valid = 0;
++    bd->bdj_pt_chapter_valid = 0;
      if (bd->bdjava != NULL) {
          bdj_process_event(bd->bdjava, BDJ_EVENT_STOP, 0);
          _queue_event(bd, BD_EVENT_STILL, 0);
-@@ -1578,6 +1706,7 @@
+@@ -1578,6 +1746,7 @@
  
  static void _close_bdj(BLURAY *bd)
  {
@@ -228,7 +283,7 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
      if (bd->bdjava != NULL) {
          bdj_close(bd->bdjava);
          bd->bdjava = NULL;
-@@ -2536,6 +2665,12 @@
+@@ -2536,6 +2705,14 @@
  
  static void _close_playlist(BLURAY *bd)
  {
@@ -237,11 +292,13 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +     * presentation timing) and forget the presented position */
 +    _bdj_pt_release(bd, 0, 1);
 +    bd->bdj_pt_presented_valid = 0;
++    bd->bdj_pt_playitem_valid = 0;
++    bd->bdj_pt_chapter_valid = 0;
 +
      if (bd->graphics_controller) {
          gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
      }
-@@ -4093,6 +4228,54 @@
+@@ -4093,6 +4270,56 @@
      bd_mutex_unlock(&bd->mutex);
  }
  
@@ -251,6 +308,8 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
 +    if (!enable) {
 +        _bdj_pt_release(bd, 0, 1);
 +        bd->bdj_pt_presented_valid = 0;
++    bd->bdj_pt_playitem_valid = 0;
++    bd->bdj_pt_chapter_valid = 0;
 +    }
 +    bd->bdj_pt_enabled = !!enable;
 +    bd_mutex_unlock(&bd->mutex);
@@ -296,9 +355,8 @@ diff -ruN a/src/libbluray/bluray.c b/src/libbluray/bluray.c
  static int _get_rate_uo_index(BLURAY *bd, uint32_t rate, bd_uo_mask_index_e *uo_index)
  {
      if (BLURAY_RATE_PAUSED == rate) {
-diff -ruN a/src/libbluray/bluray.h b/src/libbluray/bluray.h
---- a/src/libbluray/bluray.h	2026-09-26 14:38:10.615771149 -0400
-+++ b/src/libbluray/bluray.h	2026-09-26 14:38:57.517778235 -0400
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
 @@ -1147,6 +1147,42 @@
   */
  BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
@@ -342,9 +400,8 @@ diff -ruN a/src/libbluray/bluray.h b/src/libbluray/bluray.h
  /**
   *
   *  Set current playback rate.
-diff -ruN a/src/libbluray/bluray_internal.h b/src/libbluray/bluray_internal.h
---- a/src/libbluray/bluray_internal.h	2026-09-26 14:38:10.619773967 -0400
-+++ b/src/libbluray/bluray_internal.h	2026-09-26 14:38:57.517853389 -0400
+--- a/src/libbluray/bluray_internal.h
++++ b/src/libbluray/bluray_internal.h
 @@ -71,6 +71,9 @@
  
  BD_PRIVATE int      bdpriv_play_playlist_at(struct bluray *bd, int playlist, int playitem, int playmark, int64_t time);

@@ -19,16 +19,19 @@ init, start, stop, pause, resume) or the xlet's own notifyPaused /
 notifyDestroyed ends that. start() on the pre-initialised xlet goes
 straight to startXlet(). An application that load()s or init()s a xlet
 it was shown as NOT_LOADED gets a success event, as it would on a
-player, although the loader already did the work. A proxy kept from the
+player, although the loader already did the work: its state then reads
+LOADED until the application moves the xlet on itself. An application call
+that arrives before the loader's init has run cancels that init, so the
+xlet takes the ordinary lifecycle and listeners never see the loader's
+init surface after the application's own load(). A proxy kept from the
 previous title is not hidden.
 
 Present since "Only autostart when requested" (2013); unchanged in
 libbluray 1.5.1 and master.
 
-diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
---- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-07-17 05:55:51.000000000 -0400
-+++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java	2026-09-26 17:01:09.084288292 -0400
-@@ -60,11 +60,34 @@
+--- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
+@@ -60,11 +60,61 @@
      }
  
      public int getState() {
@@ -41,73 +44,99 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
 +        int s = state;
 +        if (presentOnly && (s == LOADED || s == PAUSED))
 +            return NOT_LOADED;
++        /* an application whose load() was answered from the loader's early
++         * init believes the xlet LOADED; it is PAUSED underneath until the
++         * application moves it on itself */
++        if (loadedView && s == PAUSED)
++            return LOADED;
 +        return s;
++    }
++
++    /* The loader's queued early init, if it has not run yet: an application
++     * call that arrives first cancels it and takes the ordinary path, so the
++     * disc sees one plain lifecycle instead of the loader's init surfacing
++     * after its own load(). Returns true when the init had already run (or is
++     * running), i.e. the application's command must be answered as hidden. */
++    private boolean takePresentInit() {
++        synchronized (cmds) {
++            AppCommand init = presentInit;
++            presentInit = null;
++            if (!presentOnly)
++                return false;
++            presentOnly = false;
++            if (init != null && cmds.remove(init)) {
++                init.release();
++                return false;
++            }
++            return true;
++        }
 +    }
 +
 +    /* loader only: initialise a PRESENT xlet ahead of its start */
 +    protected void initPresent() {
 +        /* only a fresh proxy: one kept from the previous title keeps its state */
-+        if (state == NOT_LOADED)
-+            presentOnly = true;
 +        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
++        cmd.setLoaderInit(true);
 +        synchronized (cmds) {
++            if (state == NOT_LOADED) {
++                presentOnly = true;
++                presentInit = cmd;
++            }
 +            cmds.addLast(cmd);
 +            cmds.notifyAll();
 +        }
      }
  
      public void load() {
-+        boolean hidden = presentOnly;
-+        presentOnly = false;
++        boolean hidden = takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
 +        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
              cmds.notifyAll();
-@@ -72,7 +95,10 @@
+@@ -72,7 +122,9 @@
      }
  
      public void init() {
-+        boolean hidden = presentOnly;
-+        presentOnly = false;
++        boolean hidden = takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
 +        cmd.setHidden(hidden);
          synchronized (cmds) {
              cmds.addLast(cmd);
              cmds.notifyAll();
-@@ -84,6 +110,7 @@
+@@ -84,6 +136,7 @@
      }
  
      public void start(String[] args) {
-+        presentOnly = false;
++        takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_START, args);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -92,6 +119,7 @@
+@@ -92,6 +145,7 @@
      }
  
      public void stop(boolean force, int timeout) {
-+        presentOnly = false;
++        takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_STOP, Boolean.valueOf(force));
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -109,6 +137,7 @@
+@@ -109,6 +163,7 @@
      }
  
      public void pause() {
-+        presentOnly = false;
++        takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_PAUSE, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -117,6 +146,7 @@
+@@ -117,6 +172,7 @@
      }
  
      public void resume() {
-+        presentOnly = false;
++        takePresentInit();
          AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
          synchronized (cmds) {
              cmds.addLast(cmd);
-@@ -350,14 +380,20 @@
+@@ -350,14 +406,22 @@
              int fromState = state;
              int toState;
              boolean ret;
@@ -117,6 +146,8 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
 +            boolean hiddenDone = cmd.isHidden() && (state == LOADED || state == PAUSED);
 +            if (hiddenDone)
 +                fromState = NOT_LOADED;
++            /* any command other than a hidden load ends the LOADED view */
++            loadedView = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;
              switch (cmd.getCommand()) {
              case AppCommand.CMD_LOAD:
                  toState = LOADED;
@@ -130,7 +161,7 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
                  break;
              case AppCommand.CMD_START:
                  toState = STARTED;
-@@ -377,11 +413,13 @@
+@@ -377,11 +441,13 @@
                  ret = doResume();
                  break;
              case AppCommand.CMD_NOTIFY_DESTROYED:
@@ -144,28 +175,33 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
                  toState = PAUSED;
                  state = PAUSED;
                  ret = true;
-@@ -389,7 +427,9 @@
+@@ -389,7 +455,12 @@
              default:
                  return;
              }
 -            notifyListeners(fromState, toState, !ret);
-+            /* the loader's early init is invisible to applications */
-+            if (!(presentOnly && cmd.getCommand() == AppCommand.CMD_INIT))
++            /* the loader's early init is invisible to applications; a hidden
++             * load reports the LOADED an application asked for */
++            if (hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD)
++                toState = LOADED;
++            if (!cmd.isLoaderInit())
 +                notifyListeners(fromState, toState, !ret);
              cmd.release();
              if (state == DESTROYED)
                  state = NOT_LOADED;
-@@ -398,7 +438,8 @@
+@@ -398,7 +469,10 @@
  
      private BDJXletContext context;
      private Xlet xlet;
 -    private int state;
 +    private volatile int state;
 +    private volatile boolean presentOnly = false;
++    private volatile boolean loadedView = false;
++    private AppCommand presentInit = null; /* guarded by cmds */
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -431,6 +472,14 @@
+@@ -431,6 +505,22 @@
              return arg;
          }
  
@@ -177,20 +213,28 @@ diff -ru a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java b/src/libbluray/
 +            return hidden;
 +        }
 +
++        public void setLoaderInit(boolean loaderInit) {
++            this.loaderInit = loaderInit;
++        }
++
++        public boolean isLoaderInit() {
++            return loaderInit;
++        }
++
          public boolean waitDone(int timeoutMs) {
              synchronized (this) {
                  while (!done) {
-@@ -466,6 +515,7 @@
+@@ -466,6 +556,8 @@
  
          private int cmd;
          private Object arg;
 +        private boolean hidden = false;
++        private boolean loaderInit = false;
          private boolean done = false;
      }
  }
-diff -ru a/src/libbluray/bdj/java/org/videolan/BDJLoader.java b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
---- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:57:39.106039947 -0400
-+++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java	2026-09-26 16:58:01.084935881 -0400
+--- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJLoader.java
 @@ -297,7 +297,7 @@
                      proxys[i].start();
                  } else if (code == AppEntry.PRESENT) {

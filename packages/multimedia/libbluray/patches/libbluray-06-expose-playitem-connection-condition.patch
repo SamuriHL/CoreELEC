@@ -16,18 +16,21 @@ only after the player has already had to decide how to handle the boundary.
 Kodi needs it up front to choose between gliding a seamless seam (keeping the
 transport stream running so the incoming clip's first access unit is not
 amputated) and holding a non-seamless one (so the truncated tail can be
-flushed). Purely additive: one field appended to the struct.
+flushed). Purely additive: one field appended at the END of the struct, so
+every existing field keeps its offset (an earlier version inserted it after
+still_time, which shifted video_stream_count and everything after it - an ABI
+break for anything built against stock 1.5.0 headers).
 
 --- a/src/libbluray/bluray.h
 +++ b/src/libbluray/bluray.h
-@@ -264,6 +264,7 @@
-     uint32_t           pkt_count;               /**< Number of mpeg-ts packets */
-     uint8_t            still_mode;              /**< Clip still mode (\ref bd_still_mode_e) */
-     uint16_t           still_time;              /**< Still time (seconds) if still_mode == BD_STILL_TIME */
+@@ -285,6 +285,7 @@
+     uint64_t           in_time;     /**< start timestamp, 90kHz */
+     uint64_t           out_time;    /**< end timestamp, 90kHz */
+     char               clip_id[6];  /**< Clip identifier (.m2ts file name) */
 +    uint8_t            connection_condition;    /**< MPLS playitem connection_condition: 5/6 seamless, 1 non-seamless */
-     uint8_t            video_stream_count;      /**< Number of video streams */
-     uint8_t            audio_stream_count;      /**< Number of audio streams */
-     uint8_t            pg_stream_count;         /**< Number of PG (Presentation Graphics) streams */
+ } BLURAY_CLIP_INFO;
+ 
+ /** Chapter entry */
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
 @@ -2995,6 +2995,7 @@
