@@ -1,0 +1,56 @@
+# Content assertions for the libbluray patch stack, checked by
+#   projects/Amlogic-ce/tools/check-patches.py apply --tarball sources/libbluray/libbluray-1.5.0.tar.gz \
+#       --assertions packages/multimedia/libbluray/patches/ASSERTIONS $(ls -1 packages/multimedia/libbluray/patches/*.patch | sort)
+# `patch` exiting 0 does not prove a hunk arrived; see
+# projects/Amlogic-ce/packages/linux-drivers/amlogic/common_drivers/patches/ASSERTIONS.
+# Format:  <path relative to the source root>:<literal string>:<exact count>
+# Every needle below is absent (0) from pristine 1.5.0, so a dropped hunk fails.
+
+# 0001 headless off / JRE tmpdir
+src/libbluray/bdj/bdj.c:option[n++].optionString = str_dup   ("-Djava.io.tmpdir=/storage/.kodi/userdata/addon_data/tools.jre.zulu");:1
+# all-001 forward 1.0.2 clip info API
+src/libbluray/bluray.c:int bd_get_clip_infos(BLURAY *bd, unsigned clip, uint64_t *clip_start_time, uint64_t *stream_start_time, uint64_t *pos, uint64_t *duration):1
+# all-002 3D subtitle depth plane
+src/libbluray/bdnav/mpls_data.h:uint8_t         ss_offset_sequence_id;:1
+# all-003 HDMV BC compare
+src/libbluray/hdmv/hdmv_vm.c:case INSN_BC: p->pc += !!(src & ~dst); break;:1
+# 01 seek limited to title duration
+src/libbluray/bluray.c:if (tick > bd->title->duration):1
+# 02 seek cut-off starting packet
+src/libbluray/bdnav/clpi_parse.c:spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + entry->fine[jj].spn_ep - 1;:1
+# 03 BD-J jar search fallback
+src/libbluray/bdj/bdj.c:BD_DEBUG(DBG_BDJ, "searching for "BDJ_JARFILE" ...\n");:1
+# 04 DV EL windowed seek recovery
+src/libbluray/bluray.c:el_recover_end_pkt:9
+# 05 selectLanguage returns on success
+src/libbluray/bdj/java/org/videolan/media/content/playlist/StreamControl.java:                    return;:1
+# 06 playitem connection_condition
+src/libbluray/bluray.h:connection_condition:2
+# 07 BD-J background plane + idle query
+src/libbluray/bdj/java/org/havi/ui/BackgroundPlane.java:import org.videolan.BDJXletContext;:1
+src/libbluray/bdj/java/org/videolan/BDJLoader.java:org.havi.ui.HBackgroundDevice.releaseBackgroundIfOwnerGone();:1
+src/libbluray/bdj/native/org_videolan_Libbluray.c:Java_org_videolan_Libbluray_updateBackgroundN:2
+# 08 prefer the installed jar
+src/libbluray/bdj/bdj.c:static char *_find_installed_jar(void):1
+# 10 graphics warm-up once per JVM
+src/libbluray/bdj/java/java/awt/BDGraphicsWarmup.java:public final class BDGraphicsWarmup {:1
+# 11 2160p video size
+src/libbluray/bdj/java/org/videolan/media/content/playlist/VideoControl.java:Dimension size = stream.getVideoSize();:1
+# 12 PlayItem components per stream type
+src/libbluray/bdj/java/org/bluray/ti/PlayItemImpl.java:StreamInfo[] audio = clip.getAudioStreams();:1
+# 13 BD-J timing notifications at presentation time
+src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_tell_time(bd);:1
+src/libbluray/bluray.c:_bdj_pt_release(bd, :8
+src/libbluray/bluray.c:bd->bdj_pt_releasing = 1;:1
+# 14 PRESENT xlets stay NOT_LOADED until started
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean presentOnly = false;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:4
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit();:6
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit();:2
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (presentOnly && (s == LOADED || s == PAUSED)):1
+# 39 pre-1.5.1 hardening backport
+src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:NPTRate(int numerator, int denominator) {:1
+src/libbluray/bluray.c:bd->bdj_pt_playitem_valid = 1;:1
+src/libbluray/bluray.c:static void _el_note_clip_end(BD_STREAM *st):1
+src/libbluray/bluray.c:_el_note_clip_end(st);:3

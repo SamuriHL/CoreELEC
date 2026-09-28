@@ -11,9 +11,13 @@ PKG_DEPENDS_UNPACK+=" jdk-${MACHINE_HARDWARE_NAME}-zulu libbluray"
 PKG_PATCH_DIRS+=" $(get_pkg_directory libbluray)/patches"
 PKG_BUILD_FLAGS="-sysroot"
 
+# Unpack the SAME archive libbluray itself builds from (its PKG_URL: the tag
+# .tar.gz, which PKG_DEPENDS_UNPACK has fetched). The patch pair in
+# PKG_PATCH_DIRS is regenerated against that archive, and the release .tar.xz is
+# no longer downloaded at all, so a clean tree could not build this jar.
 unpack() {
   mkdir -p ${PKG_BUILD}
-  tar --strip-components=1 -xf ${SOURCES}/${PKG_NAME:4}/${PKG_NAME:4}-${PKG_VERSION}.tar.xz -C ${PKG_BUILD}
+  tar --strip-components=1 -xf ${SOURCES}/${PKG_NAME:4}/${PKG_NAME:4}-${PKG_VERSION}.tar.gz -C ${PKG_BUILD}
 }
 
 pre_configure_target() {

@@ -11,3 +11,8 @@ drivers/stream_input/amports/amstream.c:vbuf->stream_offset, pts);:0
 
 # --- 0002: slave programs the stream write pointer (dual-layer, no parser) ---
 drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master's last run:2
+# the lines that do the work (the comment alone would survive a dropped hunk);
+# tab-indented needles: pristine 2 / 2 / 4, patched 3 / 3 / 6
+drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(VLD_MEM_VIFIFO_WP,:3
+drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(HEVC_STREAM_WR_PTR,:3
+drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp));:6
