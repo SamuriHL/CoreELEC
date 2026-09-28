@@ -12,320 +12,190 @@ started only when the Handshake won the race - most starts hung on a
 black screen with the menu xlet's worker waiting for a start that never
 came.
 
-Keep the early init, but hide it: a fresh proxy only the loader has
-touched reports NOT_LOADED while it is LOADED or PAUSED, and its init
-sends no state-change event. Any application call on the proxy (load,
-init, start, stop, pause, resume) or the xlet's own notifyPaused /
-notifyDestroyed ends that. start() on the pre-initialised xlet goes
-straight to startXlet(). An application that load()s or init()s a xlet
-it was shown as NOT_LOADED gets a success event, as it would on a
-player, although the loader already did the work: its state then reads
-LOADED (from the moment load() is called) until the application moves the
-xlet on itself, and every state-change event of that move starts from the
-LOADED the application was shown. An application call
-that arrives before the loader's init has run cancels that init, so the
-xlet takes the ordinary lifecycle and listeners never see the loader's
-init surface after the application's own load(); a start() that arrives
-after the loader's init reports NOT_LOADED->STARTED, as it would without
-the early init. Every such application command (start, stop, pause,
-resume) keeps the xlet NOT_LOADED to getState() until it runs; a pause or
-resume of the xlet the application saw as NOT_LOADED fails without acting
-and leaves it hidden. A proxy kept from the previous title is not hidden.
+Keep the early init, but mask it: a fresh proxy the loader initialises
+shows applications the state their own commands produced, as if the early
+init had not happened. Each application command is decided on the proxy's
+command thread when it runs, against that shown state, with the stock
+semantics of its do*() method: load() on NOT_LOADED succeeds (LOADED shown;
+the loader already loaded the class), init() reports the LOADED/NOT_LOADED
+->PAUSED the loader's init already did (or its failure), pause() and
+resume() of a xlet never started by an application fail without acting,
+stop() reports from the shown state (destroying the initialised xlet, or,
+if the loader's init failed, stopping it as stock stops an uninitialised
+one), and start() and the xlet's own notifyPaused()/notifyDestroyed() act
+for real with the shown state as their from-state. The loader's init sends
+no state-change event. The mask ends when the xlet is moved on for real; a
+proxy kept from the previous title, or one an application command queued
+first has already moved on, is not masked.
 
 Present since "Only autostart when requested" (2013); unchanged in
 libbluray 1.5.1 and master.
 
 --- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
 +++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
-@@ -60,11 +60,82 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -60,9 +60,33 @@ class BDJAppProxy implements DVBJProxy, Runnable {
      }
  
      public int getState() {
--        return state;
-+        /* A PRESENT xlet that only the loader has touched (initPresent()) is
-+         * still NOT_LOADED to the disc: a player loads it only when an
-+         * application starts it. BD+ Handshake xlets (Turbo 3D) start the
-+         * disc's menu xlet only while it reports NOT_LOADED, and the early
-+         * init raced them. */
-+        int s = state;
-+        /* an application whose load() was answered from the loader's early
-+         * init believes the xlet LOADED; it is PAUSED underneath (or still
-+         * being loaded by that init) until the application moves it on itself */
-+        if (loadedView && (s == NOT_LOADED || s == LOADED || s == PAUSED))
-+            return LOADED;
-+        /* ...and it stays NOT_LOADED to an application whose other command
-+         * on it has not run yet: that command's event starts from NOT_LOADED */
-+        if ((presentOnly || hiddenPending > 0) && (s == LOADED || s == PAUSED))
-+            return NOT_LOADED;
-+        return s;
-+    }
-+
-+    /* The loader's queued early init, if it has not run yet: an application
-+     * call that arrives first cancels it and takes the ordinary path, so the
-+     * disc sees one plain lifecycle instead of the loader's init surfacing
-+     * after its own load(). Returns true when the init had already run (or is
-+     * running), i.e. the application's command must be answered as hidden.
-+     * A hidden load() moves getState() straight from NOT_LOADED to the LOADED
-+     * view, with no PAUSED visible before its command runs; any other hidden
-+     * command keeps NOT_LOADED visible until it runs (hiddenPending). */
-+    private boolean takePresentInit(boolean forLoad) {
-+        synchronized (cmds) {
-+            AppCommand init = presentInit;
-+            presentInit = null;
-+            if (!presentOnly)
-+                return false;
-+            if (init != null && cmds.remove(init)) {
-+                presentOnly = false;
-+                init.release();
-+                return false;
-+            }
-+            if (forLoad) {
-+                loadedView = true;
-+                loadedViewSeq++;
-+            } else {
-+                hiddenPending++;
-+            }
-+            presentOnly = false;
-+            return true;
-+        }
-+    }
-+
-+    /* a hidden command that failed without acting: the xlet is still only the
-+     * loader's, and still NOT_LOADED to applications */
-+    private void keepHidden() {
-+        synchronized (cmds) {
-+            if (!loadedView)
-+                presentOnly = true;
-+        }
-+    }
-+
-+    /* loader only: initialise a PRESENT xlet ahead of its start */
++        /* A PRESENT xlet that only the loader has initialised (initPresent())
++         * is still NOT_LOADED to the disc: a player loads it only when an
++         * application asks. BD+ Handshake xlets (Turbo 3D) start the disc's
++         * menu xlet only while it reports NOT_LOADED, and the early init raced
++         * them. While masked, applications see the state their own commands
++         * produced, as if the early init had not happened. */
++        if (masked)
++            return shown;
+         return state;
+     }
+ 
++    /* loader only: initialise a PRESENT xlet ahead of its start, invisibly */
 +    protected void initPresent() {
-+        /* only a fresh proxy: one kept from the previous title keeps its state */
 +        AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
-+        cmd.setLoaderInit(true);
++        cmd.setLoaderInit();
 +        synchronized (cmds) {
-+            if (state == NOT_LOADED) {
-+                presentOnly = true;
-+                presentInit = cmd;
++            /* only a fresh proxy: one kept from the previous title keeps its
++             * state, and the command below then fails without an event */
++            if (state == NOT_LOADED && !masked) {
++                shown = NOT_LOADED;
++                masked = true;
 +            }
 +            cmds.addLast(cmd);
 +            cmds.notifyAll();
 +        }
-     }
- 
++    }
++
      public void load() {
-+        boolean hidden = takePresentInit(true);
          AppCommand cmd = new AppCommand(AppCommand.CMD_LOAD, null);
-+        cmd.setHidden(hidden);
          synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -72,7 +143,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-     }
- 
-     public void init() {
-+        boolean hidden = takePresentInit(false);
-         AppCommand cmd = new AppCommand(AppCommand.CMD_INIT, null);
-+        cmd.setHidden(hidden);
-         synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -84,7 +157,11 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-     }
- 
-     public void start(String[] args) {
-+        /* hidden: the application saw NOT_LOADED, so the start it gets
-+         * reported is NOT_LOADED->STARTED, as without the early init */
-+        boolean hidden = takePresentInit(false);
-         AppCommand cmd = new AppCommand(AppCommand.CMD_START, args);
-+        cmd.setHidden(hidden);
-         synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -92,7 +169,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-     }
- 
-     public void stop(boolean force, int timeout) {
-+        boolean hidden = takePresentInit(false);
-         AppCommand cmd = new AppCommand(AppCommand.CMD_STOP, Boolean.valueOf(force));
-+        cmd.setHidden(hidden);
-         synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -109,7 +188,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-     }
- 
-     public void pause() {
-+        boolean hidden = takePresentInit(false);
-         AppCommand cmd = new AppCommand(AppCommand.CMD_PAUSE, null);
-+        cmd.setHidden(hidden);
-         synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -117,7 +198,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-     }
- 
-     public void resume() {
-+        boolean hidden = takePresentInit(false);
-         AppCommand cmd = new AppCommand(AppCommand.CMD_RESUME, null);
-+        cmd.setHidden(hidden);
-         synchronized (cmds) {
-             cmds.addLast(cmd);
-             cmds.notifyAll();
-@@ -344,20 +427,54 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-                     }
-                 }
-                 cmd = (AppCommand)cmds.removeFirst();
-+                viewSeqAtStart = loadedViewSeq;
-+                if (cmd != null && cmd.isHidden() && cmd.getCommand() != AppCommand.CMD_LOAD)
-+                    hiddenPending--;
+@@ -347,7 +371,23 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              }
              if (cmd == null)
                  return;
-             int fromState = state;
+-            int fromState = state;
++            if (cmd.isLoaderInit()) {
++                /* the loader's early init: no event. A proxy that was not
++                 * fresh (not masked), or that an application command queued
++                 * ahead of this one has already moved on, is left alone. */
++                if (masked) {
++                    if (state == NOT_LOADED)
++                        doInit();
++                    else
++                        masked = false;
++                }
++                cmd.release();
++                continue;
++            }
++            maskedFrom = -1;
++            if (masked && runMasked(cmd))
++                continue;
++            int fromState = (maskedFrom >= 0) ? maskedFrom : state;
              int toState;
              boolean ret;
-+            /* an application loading or initialising a xlet it was shown as
-+             * NOT_LOADED gets the success a player would report, even though
-+             * the loader already did the work */
-+            boolean hiddenDone = cmd.isHidden() && (state == LOADED || state == PAUSED);
-+            if (hiddenDone)
-+                fromState = NOT_LOADED;
-+            /* After a hidden load the application believes the xlet LOADED while
-+             * the loader has it PAUSED: every command then starts from the
-+             * LOADED it was shown, and its own init() is the LOADED->PAUSED a
-+             * player would report, already done. (Not the hidden load itself:
-+             * that is the NOT_LOADED->LOADED above.) */
-+            boolean hiddenLoad = hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD;
-+            if (loadedView && state == PAUSED && !hiddenLoad && !cmd.isLoaderInit()) {
-+                fromState = LOADED;
-+                /* init() is the LOADED->PAUSED already done; a repeated load()
-+                 * finds the xlet LOADED, as shown, and keeps that view */
-+                if (cmd.getCommand() == AppCommand.CMD_INIT || cmd.getCommand() == AppCommand.CMD_LOAD)
-+                    hiddenDone = true;
-+                if (cmd.getCommand() == AppCommand.CMD_LOAD)
-+                    hiddenLoad = true;
-+            }
-+            /* any application command other than a hidden load ends the LOADED
-+             * view; the loader's own init (possibly still running when a hidden
-+             * load() set it) leaves it alone, and so does a command that began
-+             * before the application's load() set it */
-+            if (!cmd.isLoaderInit()) {
-+                synchronized (cmds) {
-+                    if (loadedViewSeq == viewSeqAtStart)
-+                        loadedView = hiddenLoad;
-+                }
-+            }
              switch (cmd.getCommand()) {
-             case AppCommand.CMD_LOAD:
-                 toState = LOADED;
--                ret = doLoad();
-+                ret = doLoad() || hiddenDone;
-                 break;
-             case AppCommand.CMD_INIT:
-                 toState = PAUSED;
--                ret = doInit();
-+                ret = doInit() || hiddenDone;
-                 break;
-             case AppCommand.CMD_START:
-                 toState = STARTED;
-@@ -370,18 +487,26 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-                 break;
-             case AppCommand.CMD_PAUSE:
-                 toState = PAUSED;
--                ret = doPause();
-+                /* the application saw NOT_LOADED: pausing that fails, as
-+                 * without the early init */
-+                ret = hiddenDone ? false : doPause();
-+                if (hiddenDone)
-+                    keepHidden();
-                 break;
-             case AppCommand.CMD_RESUME:
-                 toState = STARTED;
--                ret = doResume();
-+                ret = hiddenDone ? false : doResume();
-+                if (hiddenDone)
-+                    keepHidden();
-                 break;
-             case AppCommand.CMD_NOTIFY_DESTROYED:
-+                presentOnly = false;
-                 toState = DESTROYED;
-                 state = DESTROYED;
-                 ret = true;
-                 break;
-             case AppCommand.CMD_NOTIFY_PAUSED:
-+                presentOnly = false;
-                 toState = PAUSED;
-                 state = PAUSED;
-                 ret = true;
-@@ -389,16 +514,33 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+@@ -389,6 +429,9 @@ class BDJAppProxy implements DVBJProxy, Runnable {
              default:
                  return;
              }
--            notifyListeners(fromState, toState, !ret);
-+            /* the loader's early init is invisible to applications; a hidden
-+             * load reports the LOADED an application asked for */
-+            if (hiddenDone && cmd.getCommand() == AppCommand.CMD_LOAD)
-+                toState = LOADED;
-+            if (!cmd.isLoaderInit())
-+                notifyListeners(fromState, toState, !ret);
++            /* acted for real: nothing is masked any more (this also drops a
++             * mask initPresent() set while this command was already running) */
++            masked = false;
+             notifyListeners(fromState, toState, !ret);
              cmd.release();
--            if (state == DESTROYED)
-+            if (state == DESTROYED) {
-                 state = NOT_LOADED;
-+                /* a destroyed xlet is NOT_LOADED to everyone, whatever view a
-+                 * load() queued meanwhile set up (that load now runs for real) */
-+                synchronized (cmds) {
-+                    loadedView = false;
-+                }
-+            }
+             if (state == DESTROYED)
+@@ -396,9 +439,76 @@ class BDJAppProxy implements DVBJProxy, Runnable {
          }
      }
  
++    /* A command on a masked xlet, answered from the state applications were
++     * shown with stock semantics (see the do*() methods): the loader's init
++     * already did the work a load or init would. Commands that move the xlet
++     * on for real take the ordinary path with the shown state as their
++     * from-state, and unmask it once done. Returns true when the command was
++     * answered here. */
++    private boolean runMasked(AppCommand cmd) {
++        int from = shown;
++        int to;
++        boolean ret;
++        switch (cmd.getCommand()) {
++        case AppCommand.CMD_LOAD:
++            /* the loader's init loaded the class (xlet set) or failed to */
++            to = LOADED;
++            if (shown == LOADED) {
++                ret = false;                /* stock: already loaded */
++            } else if (xlet != null) {
++                shown = LOADED;
++                ret = true;
++            } else {
++                masked = false;             /* the load failed: INVALID */
++                ret = false;
++            }
++            break;
++        case AppCommand.CMD_INIT:
++            /* done by the loader's init, or failed there as it would here */
++            to = PAUSED;
++            ret = (state == PAUSED);
++            masked = false;
++            break;
++        case AppCommand.CMD_STOP:
++            to = DESTROYED;
++            if (state == PAUSED) {
++                maskedFrom = from;          /* destroy the initialised xlet */
++                return false;
++            }
++            masked = false;
++            /* never initialised: stock stops a NOT_LOADED/LOADED xlet
++             * without calling it */
++            xlet = null;
++            state = NOT_LOADED;
++            ret = true;
++            break;
++        case AppCommand.CMD_PAUSE:
++            to = PAUSED;                    /* never started: fails */
++            ret = false;
++            break;
++        case AppCommand.CMD_RESUME:
++            to = STARTED;                   /* never paused by an application: fails */
++            ret = false;
++            break;
++        default:
++            /* start and the xlet's own notifications act for real; the
++             * mask stays on until they have */
++            maskedFrom = from;
++            return false;
++        }
++        notifyListeners(from, to, !ret);
++        cmd.release();
++        return true;
++    }
++
      private BDJXletContext context;
      private Xlet xlet;
 -    private int state;
 +    private volatile int state;
-+    private volatile boolean presentOnly = false;
-+    private volatile boolean loadedView = false;
-+    private int loadedViewSeq = 0; /* guarded by cmds */
-+    private int viewSeqAtStart = 0; /* run() thread only */
-+    private volatile int hiddenPending = 0; /* written under cmds; read unlocked by getState() */
-+    private AppCommand presentInit = null; /* guarded by cmds */
++    /* the early-init mask: written by initPresent() under cmds (fresh proxy,
++     * nothing queued before it) and afterwards only by the command thread */
++    private volatile boolean masked = false;
++    private volatile int shown = NOT_LOADED;
++    private int maskedFrom = -1; /* command thread only */
      private LinkedList listeners = new LinkedList();
      private LinkedList cmds = new LinkedList();
      private Thread thread;
-@@ -431,6 +573,22 @@ class BDJAppProxy implements DVBJProxy, Runnable {
-             return arg;
-         }
+@@ -464,8 +574,17 @@ class BDJAppProxy implements DVBJProxy, Runnable {
+         public static final int CMD_NOTIFY_DESTROYED = 6;
+         public static final int CMD_NOTIFY_PAUSED = 7;
  
-+        public void setHidden(boolean hidden) {
-+            this.hidden = hidden;
-+        }
-+
-+        public boolean isHidden() {
-+            return hidden;
-+        }
-+
-+        public void setLoaderInit(boolean loaderInit) {
-+            this.loaderInit = loaderInit;
++        public void setLoaderInit() {
++            loaderInit = true;
 +        }
 +
 +        public boolean isLoaderInit() {
 +            return loaderInit;
 +        }
 +
-         public boolean waitDone(int timeoutMs) {
-             synchronized (this) {
-                 while (!done) {
-@@ -466,6 +624,8 @@ class BDJAppProxy implements DVBJProxy, Runnable {
- 
          private int cmd;
          private Object arg;
-+        private boolean hidden = false;
-+        private boolean loaderInit = false;
          private boolean done = false;
++        private boolean loaderInit = false;
      }
  }
 --- a/src/libbluray/bdj/java/org/videolan/BDJLoader.java

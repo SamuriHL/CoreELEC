@@ -58,24 +58,19 @@ src/libbluray/bluray.c:bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq + 1;:1
 src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);:1
 # 14 PRESENT xlets stay NOT_LOADED until started
 src/libbluray/bdj/java/org/videolan/BDJLoader.java:proxys[i].initPresent();:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:loadedView = hiddenLoad;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedViewSeq == viewSeqAtStart):1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedView && (s == NOT_LOADED || s == LOADED || s == PAUSED)):1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (loadedView && state == PAUSED && !hiddenLoad && !cmd.isLoaderInit()) {:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(true);:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:                loadedView = true;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(false);:5
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean presentOnly = false;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:presentOnly = false;:5
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:takePresentInit(:7
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:boolean hidden = takePresentInit(false);:5
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!cmd.isLoaderInit()):2
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if ((presentOnly || hiddenPending > 0) && (s == LOADED || s == PAUSED)):1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:hiddenPending--;:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = hiddenDone ? false : doPause();:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = hiddenDone ? false : doResume();:1
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:keepHidden();:2
-src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:cmd.setHidden(hidden);:6
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:return shown;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:protected void initPresent() {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:cmd.setLoaderInit();:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (cmd.isLoaderInit()) {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (masked && runMasked(cmd)):1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:int fromState = (maskedFrom >= 0) ? maskedFrom : state;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private boolean runMasked(AppCommand cmd) {:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = (state == PAUSED);:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private volatile boolean masked = false;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:private boolean loaderInit = false;:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:maskedFrom = from;:2
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = false;                /* stock: already loaded */:1
+src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:mask initPresent() set while this command was already running) */:1
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
 src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1
