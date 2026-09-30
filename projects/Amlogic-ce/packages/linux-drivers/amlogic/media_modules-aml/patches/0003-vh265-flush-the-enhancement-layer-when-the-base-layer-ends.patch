@@ -1,47 +1,54 @@
 From: SamuriHL <samurihl@gmail.com>
 Date: Wed, 30 Sep 2026 08:30:00 -0400
-Subject: [PATCH] vh265: flush the enhancement layer when the base layer ends
+Subject: [PATCH] vh265: at end of stream, flush the other layer of a dual-layer pair
 
-A dual-layer (Dolby Vision FEL/MEL) stream-mode pair schedules the
-enhancement layer only when the base layer's parser hands over to it
-(switch_dvlayer_flag). When the player ends the stream (AMSTREAM_SET_EOS)
-the base layer takes DEC_RESULT_EOS and flushes its own reorder buffer,
-but keeps sched, and its run_ready returns 0 from then on: the slave
-never runs again, and its last pictures stay in its reorder buffer. The
-Dolby Vision path then holds the base pictures that did come out ("bl
-wait el") - the last pictures of a FEL file or disc segment never show
-(FEL_test_for_AVS.m2ts: two).
+A dual-layer (Dolby Vision FEL/MEL) stream-mode pair runs one layer at a
+time and hands over only when one parser finds the other layer's next
+unit (switch_dvlayer_flag). When the player ends the stream
+(AMSTREAM_SET_EOS) the layer running at that moment takes DEC_RESULT_EOS
+and flushes its own reorder buffer, keeps sched, and its run_ready
+returns 0 from then on: the other layer never runs again and its last
+pictures stay in its reorder buffer, while the Dolby Vision path holds
+the base pictures waiting for their pairs. The last pictures of a FEL
+file or disc segment never show (FEL_test_for_AVS.m2ts: two). Either
+layer can be the one that ends: the base on one run, the enhancement
+layer on the next.
 
-Flush the slave from the base layer's EOS branch, exactly as the "no el
-anymore" path in the ISR already does, and before the base layer so
-every base picture finds its enhancement picture queued.
+Flush the partner from the EOS branch, exactly as the ISR's "no el
+anymore" path already flushes the enhancement layer, and say so.
 
 ---
 --- a/drivers/frame_provider/decoder/h265/vh265.c
 +++ b/drivers/frame_provider/decoder/h265/vh265.c
-@@ -14738,6 +14738,26 @@
+@@ -14738,6 +14738,32 @@
  		hevc_print(hevc, PRINT_FLAG_VDEC_STATUS,
  			"%s: end of stream, last dec poc %d => 0x%pf\n",
  			__func__, hevc->curr_POC, pic);
-+		/* Dual-layer: the enhancement layer is scheduled only when this
-+		 * layer's parser hands over to it, which never happens again once
-+		 * this layer has ended - so flush it here, as the "no el anymore"
-+		 * path in the ISR does, and before the base layer, so every base
-+		 * picture that goes out finds its enhancement picture queued. */
-+		if (vdec->slave && vdec->slave->private) {
-+			struct hevc_state_s *hevc_el =
-+				(struct hevc_state_s *)vdec->slave->private;
-+			struct PIC_s *el_pic;
++		/* Dual-layer: the two layers run only when one's parser hands over
++		 * to the other, which never happens again once this one has ended
++		 * - whichever it is (the stream ends in the enhancement layer when
++		 * its last unit is the EL's). Flush the partner here, as the "no el
++		 * anymore" path in the ISR does for the enhancement layer, so its
++		 * last pictures come out and every base picture finds its pair. */
++		if ((vdec->slave && vdec->slave->private) ||
++			(vdec->master && vdec->master->private)) {
++			struct vdec_s *partner =
++				vdec->slave ? vdec->slave : vdec->master;
++			struct hevc_state_s *hevc_p =
++				(struct hevc_state_s *)partner->private;
++			struct PIC_s *p_pic;
 +
-+			check_pic_decoded_error(hevc_el,
-+				hevc_el->pic_decoded_lcu_idx);
-+			el_pic = get_pic_by_POC(hevc_el, hevc_el->curr_POC);
-+			hevc_el->curr_POC = INVALID_POC;
-+			hevc_el->m_pocRandomAccess = MAX_INT;
-+			flush_output(hevc_el, el_pic);
-+			hevc_el->decoded_poc = INVALID_POC;
-+			hevc_el->decoding_pic = NULL;
-+			hevc_print(hevc, 0, "end of stream: flushed el\n");
++			check_pic_decoded_error(hevc_p,
++				hevc_p->pic_decoded_lcu_idx);
++			p_pic = get_pic_by_POC(hevc_p, hevc_p->curr_POC);
++			hevc_p->curr_POC = INVALID_POC;
++			hevc_p->m_pocRandomAccess = MAX_INT;
++			flush_output(hevc_p, p_pic);
++			hevc_p->decoded_poc = INVALID_POC;
++			hevc_p->decoding_pic = NULL;
++			pr_info("vh265: end of stream in the %s layer: flushed the %s layer\n",
++				vdec->slave ? "base" : "enhancement",
++				vdec->slave ? "enhancement" : "base");
 +		}
  		flush_output(hevc, pic);
  		/* dummy vf with eos flag to backend */
