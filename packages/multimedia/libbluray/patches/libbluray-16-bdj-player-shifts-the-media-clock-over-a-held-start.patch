@@ -1,0 +1,130 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: let the player shift the media clock over a held start
+
+The media clock a BD-J application reads (BDHandler.getMediaNanoseconds)
+anchors once, at doStart, and then runs on the wall clock. A player that
+holds its presentation clock after the playlist has started - to change
+the display mode before the first picture is shown - leaves the
+application's clock early by the length of the hold, for the rest of the
+playlist. Patch 13 already holds marks, playitems and PSR 8 for
+presentation, but not this clock.
+
+Add bd_bdj_shift_media_clock(bd, ticks): a player-internal event
+(BDJ_EVENT_CLOCK_SHIFT) moves the playlist player's time base by the
+held duration. It is queued like any status event, so the caller never
+waits on a Java monitor under bd->mutex, reaches no application
+listener, and releases nothing that is held.
+
+---
+--- a/src/libbluray/bdj/bdj.h
++++ b/src/libbluray/bdj/bdj.h
+@@ -59,7 +59,10 @@
+     BDJ_EVENT_UO_MASKED        = 17,
+     BDJ_EVENT_MOUSE            = 18,
+ 
+-    BDJ_EVENT_LAST             = 18,
++    /* Player-internal: shift the media clock (param: 90 kHz ticks) */
++    BDJ_EVENT_CLOCK_SHIFT      = 19,
++
++    BDJ_EVENT_LAST             = 19,
+ 
+ } BDJ_EVENT;
+ 
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -1193,6 +1193,8 @@
+         /* 16 */ "VK_KEY",
+         /* 17 */ "UO_MASKED",
+         /* 18 */ "MOUSE",
++
++        /* 19 */ "CLOCK_SHIFT",
+     };
+ 
+     JNIEnv* env;
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1184,6 +1184,15 @@
+ BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
+ 
+ /**
++ *  The player held its presentation clock for `ticks` (90 kHz) after the
++ *  BD-J application's playback started (a display mode change before the
++ *  first picture): move the application's media clock by as much. No event
++ *  reaches the application, and nothing held is released.
++ */
++#define BD_BDJ_MEDIA_CLOCK_SHIFT 1
++BD_PUBLIC void     bd_bdj_shift_media_clock(BLURAY *bd, uint32_t ticks);
++
++/**
+  *
+  *  Set current playback rate.
+  *
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -4323,6 +4323,16 @@
+     bd_mutex_unlock(&bd->mutex);
+ }
+ 
++void bd_bdj_shift_media_clock(BLURAY *bd, uint32_t ticks)
++{
++    bd_mutex_lock(&bd->mutex);
++    if (bd->title_type == title_bdj && bd->bdjava) {
++        BD_DEBUG(DBG_BLURAY, "bd_bdj_shift_media_clock(%u ticks)\n", ticks);
++        bdj_process_event(bd->bdjava, BDJ_EVENT_CLOCK_SHIFT, ticks);
++    }
++    bd_mutex_unlock(&bd->mutex);
++}
++
+ void bd_bdj_release_all(BLURAY *bd)
+ {
+     bd_mutex_lock(&bd->mutex);
+--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+@@ -780,6 +780,7 @@
+         case BDJ_EVENT_UO_MASKED:
+         case BDJ_EVENT_SEEK:
+         case BDJ_EVENT_RATE:
++        case BDJ_EVENT_CLOCK_SHIFT:
+             result = PlayerManager.getInstance().onEvent(event, param);
+             break;
+ 
+@@ -884,6 +885,8 @@
+     public  static final int BDJ_EVENT_UO_MASKED                = 17;
+     private static final int BDJ_EVENT_MOUSE                    = 18;
+ 
++    public  static final int BDJ_EVENT_CLOCK_SHIFT              = 19;
++
+     public static final int AACS_DISC_ID           = 1;
+     public static final int AACS_MEDIA_VID         = 2;
+     public static final int AACS_MEDIA_PMSN        = 3;
+--- a/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
++++ b/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
+@@ -377,6 +377,18 @@
+         }
+     }
+ 
++    /* The player held its clock for ticks (90 kHz) after this player started
++     * (a display mode change before the first picture): the media time must
++     * not have run on during it. Not an application-visible event. */
++    protected void doClockShift(long ticks) {
++        synchronized (this) {
++            if (state == Started && rate != 0.0f) {
++                baseTime += ticks * 100000L / 9L; /* 90 kHz -> ns */
++                Logger.getLogger("BDHandler").info("media clock shifted by " + (ticks / 90) + " ms");
++            }
++        }
++    }
++
+     protected void doSeekNotify(long tick) {
+         updateTime(new Time(tick * TO_SECONDS));
+     }
+@@ -676,6 +688,9 @@
+                 case Libbluray.BDJ_EVENT_SEEK:
+                     player.doSeekNotify(param2 * 2 /* 45kHz -> 90kHz */);
+                     break;
++                case Libbluray.BDJ_EVENT_CLOCK_SHIFT:
++                    player.doClockShift(param2 & 0xffffffffL);
++                    break;
+                 case Libbluray.BDJ_EVENT_RATE:
+                     float rate = (float)param2 / 90000.0f;
+                     if (rate < 0.0f) rate = -rate;

@@ -120,3 +120,11 @@ src/libbluray/decoders/graphics_controller.c:_flush_osd(gc, BD_OVERLAY_IG, gc->r
 src/libbluray/decoders/graphics_controller.c:int64_t pts = gc->render_pts;:1
 src/libbluray/decoders/graphics_controller.c:p->render_pts = -1;:1
 src/libbluray/bluray.c:_run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);:2
+# libbluray-16: the player shifts the BD-J media clock over a held start
+src/libbluray/bdj/bdj.h:BDJ_EVENT_CLOCK_SHIFT      = 19,:1
+src/libbluray/bdj/bdj.c:/* 19 */ "CLOCK_SHIFT",:1
+src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_shift_media_clock(BLURAY *bd, uint32_t ticks);:1
+src/libbluray/bluray.c:bdj_process_event(bd->bdjava, BDJ_EVENT_CLOCK_SHIFT, ticks);:1
+src/libbluray/bdj/java/org/videolan/Libbluray.java:case BDJ_EVENT_CLOCK_SHIFT::1
+src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:player.doClockShift(param2 & 0xffffffffL);:1
+src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:baseTime += ticks * 100000L / 9L; /* 90 kHz -> ns */:1
