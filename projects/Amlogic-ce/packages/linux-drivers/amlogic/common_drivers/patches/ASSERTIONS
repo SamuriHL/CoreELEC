@@ -138,3 +138,8 @@ drivers/media/enhancement/amdolby_vision/amdv.c:pr_dv_dbg("graphic follow video 
 
 # --- 0018: vout device checked before the sink min/max read (upstream 4dbe1c27) ---
 drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinfo->vout_device->dv_info &&:2
+
+# --- 0019: the sink's SCDC lock exposed as sink_lock ---
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:static DEVICE_ATTR_RO(sink_lock);:1
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:ret = device_create_file(dev, &dev_attr_sink_lock);:1
+drivers/media/vout/hdmitx21/hdmi_tx_main.c:if (hdmitx_ddcm_read(0, DDC_SCDC_ADDR, SCDC_STATUS_FLAGS_0, &val, 1,:1
