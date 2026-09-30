@@ -16,3 +16,6 @@ drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(VLD_MEM_VIFIFO_WP,:3
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(HEVC_STREAM_WR_PTR,:3
 drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp));:6
+# 0003: the base layer's EOS flushes the enhancement layer
+drivers/frame_provider/decoder/h265/vh265.c:hevc_print(hevc, 0, "end of stream: flushed el\n");:1
+drivers/frame_provider/decoder/h265/vh265.c:if (vdec->slave && vdec->slave->private) {:1
