@@ -10,9 +10,12 @@ start (Halo S2: about a second).
 
 Give that first display, and its first effect frame, the pts
 BD_OVERLAY_PTS_WITH_NEXT_VIDEO (-2): the page belongs with the first
-picture of the playlist that starts it. Only the INIT_MENU of a preloaded
-stream (HDMV play-playlist, PSR_TIME restore) sets it; user input,
-animation, pop-ups and IG_END keep -1, and the overlay struct is
+picture of the playlist that starts it. The INIT_MENU of a preloaded
+stream (HDMV play-playlist, PSR_TIME restore) arms the mark and the next
+IG flush consumes it, whichever command draws it: page 0 is often empty
+and its button commands draw the real page with SET_BUTTON_PAGE (Halo S2
+main menu). Later flushes keep -1 (the player keeps them in order behind
+the waiting page), user input and a reset disarm it, and the overlay struct is
 unchanged.
 
 ---
@@ -42,15 +45,23 @@ unchanged.
      void           *overlay_proc_handle;
      void          (*overlay_proc)(void *, const struct bd_overlay_s * const);
  
-+    /* pts of the IG flushes being rendered: -1 = show at once (user input,
-+     * animation), BD_OVERLAY_PTS_WITH_NEXT_VIDEO = first display of a
-+     * preloaded page, which belongs with the first picture of its playlist */
++    /* pts of the next IG flush: -1 = show at once (user input, animation),
++     * BD_OVERLAY_PTS_WITH_NEXT_VIDEO = first display after a preloaded
++     * menu starts, which belongs with the first picture of its playlist */
 +    int64_t         render_pts;
 +
      /* state */
      unsigned        ig_open;
      unsigned        ig_drawn;
-@@ -811,6 +816,8 @@
+@@ -739,6 +744,7 @@
+ 
+     gc->popup_visible = 0;
+     gc->valid_mouse_position = 0;
++    gc->render_pts = -1;
+     gc->page_uo_mask = uo_mask_get_empty();
+ 
+     graphics_processor_free(&gc->igp);
+@@ -811,6 +817,8 @@
      p->overlay_proc_handle = handle;
      p->overlay_proc        = func;
  
@@ -59,7 +70,7 @@ unchanged.
      bd_mutex_init(&p->mutex);
  
      bd_psr_register_cb(regs, _process_psr_event, p);
-@@ -1349,7 +1356,7 @@
+@@ -1349,7 +1357,7 @@
  {
      BD_PG_PALETTE *palette = NULL;
      unsigned ii;
@@ -68,27 +79,47 @@ unchanged.
  
      if (!gc->ig_open) {
          _open_osd(gc, BD_OVERLAY_IG, 0, 0,
-@@ -1508,7 +1515,7 @@
+@@ -1370,6 +1378,7 @@
+     }
+ 
+     _flush_osd(gc, BD_OVERLAY_IG, pts);
++    gc->render_pts = -1;
+ 
+     _reset_user_timeout(gc);
+ 
+@@ -1508,7 +1517,8 @@
      }
  
      if (gc->ig_dirty) {
 -        _flush_osd(gc, BD_OVERLAY_IG, -1);
 +        _flush_osd(gc, BD_OVERLAY_IG, gc->render_pts);
++        gc->render_pts = -1;
          gc->ig_dirty = 0;
          return 1;
      }
-@@ -2040,8 +2047,11 @@
+@@ -2004,6 +2014,11 @@
+         return result;
+     }
+ 
++    /* what the user asks for is shown at once */
++    if (ctrl == GC_CTRL_VK_KEY || ctrl == GC_CTRL_POPUP || ctrl == GC_CTRL_MOUSE_MOVE) {
++        gc->render_pts = -1;
++    }
++
+     switch (ctrl) {
+ 
+         case GC_CTRL_SET_BUTTON_PAGE:
+@@ -2040,6 +2055,10 @@
              break;
  
          case GC_CTRL_INIT_MENU:
-+            /* param: the IG stream was preloaded (see bluray.c) */
++            /* param: the IG stream was preloaded (see bluray.c). The mark
++             * stays until the first display: page 0 is often empty and its
++             * button commands draw the real page (SET_BUTTON_PAGE) */
 +            gc->render_pts = param ? BD_OVERLAY_PTS_WITH_NEXT_VIDEO : -1;
              _select_page(gc, 0, 0);
              _render_page(gc, 0xffff, cmds);
-+            gc->render_pts = -1;
              break;
- 
-         case GC_CTRL_IG_END:
 --- a/src/libbluray/decoders/overlay.h
 +++ b/src/libbluray/decoders/overlay.h
 @@ -97,6 +97,13 @@
