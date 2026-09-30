@@ -1,0 +1,107 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] IG: mark the first display of a preloaded page
+
+A preloaded (sub-path) Interactive Graphics stream is decoded in full when
+its playlist starts, and HDMV play-playlist renders the first page right
+away - before the player has read, let alone decoded, a single picture of
+that playlist. Every IG flush carries pts -1 ("show at once"), so a player
+draws the page over black, or over the previous clip, for the whole decoder
+start (Halo S2: about a second).
+
+Give that first display, and its first effect frame, the pts
+BD_OVERLAY_PTS_WITH_NEXT_VIDEO (-2): the page belongs with the first
+picture of the playlist that starts it. Only the INIT_MENU of a preloaded
+stream (HDMV play-playlist, PSR_TIME restore) sets it; user input,
+animation, pop-ups and IG_END keep -1, and the overlay struct is
+unchanged.
+
+---
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -3665,7 +3665,7 @@
+         case PSR_TIME:
+             _clip_seek_time(bd, ev->new_val);
+             _init_ig_stream(bd);
+-            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
++            _run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);
+             return;
+ 
+         case PSR_SELECTED_BUTTON_ID:
+@@ -4104,7 +4104,7 @@
+ 
+             /* initialize menus */
+             _init_ig_stream(bd);
+-            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
++            _run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);
+             break;
+ 
+         case HDMV_EVENT_PLAY_PI:
+--- a/src/libbluray/decoders/graphics_controller.c
++++ b/src/libbluray/decoders/graphics_controller.c
+@@ -73,6 +73,11 @@
+     void           *overlay_proc_handle;
+     void          (*overlay_proc)(void *, const struct bd_overlay_s * const);
+ 
++    /* pts of the IG flushes being rendered: -1 = show at once (user input,
++     * animation), BD_OVERLAY_PTS_WITH_NEXT_VIDEO = first display of a
++     * preloaded page, which belongs with the first picture of its playlist */
++    int64_t         render_pts;
++
+     /* state */
+     unsigned        ig_open;
+     unsigned        ig_drawn;
+@@ -811,6 +816,8 @@
+     p->overlay_proc_handle = handle;
+     p->overlay_proc        = func;
+ 
++    p->render_pts = -1;
++
+     bd_mutex_init(&p->mutex);
+ 
+     bd_psr_register_cb(regs, _process_psr_event, p);
+@@ -1349,7 +1356,7 @@
+ {
+     BD_PG_PALETTE *palette = NULL;
+     unsigned ii;
+-    int64_t pts = -1;
++    int64_t pts = gc->render_pts;
+ 
+     if (!gc->ig_open) {
+         _open_osd(gc, BD_OVERLAY_IG, 0, 0,
+@@ -1508,7 +1515,7 @@
+     }
+ 
+     if (gc->ig_dirty) {
+-        _flush_osd(gc, BD_OVERLAY_IG, -1);
++        _flush_osd(gc, BD_OVERLAY_IG, gc->render_pts);
+         gc->ig_dirty = 0;
+         return 1;
+     }
+@@ -2040,8 +2047,11 @@
+             break;
+ 
+         case GC_CTRL_INIT_MENU:
++            /* param: the IG stream was preloaded (see bluray.c) */
++            gc->render_pts = param ? BD_OVERLAY_PTS_WITH_NEXT_VIDEO : -1;
+             _select_page(gc, 0, 0);
+             _render_page(gc, 0xffff, cmds);
++            gc->render_pts = -1;
+             break;
+ 
+         case GC_CTRL_IG_END:
+--- a/src/libbluray/decoders/overlay.h
++++ b/src/libbluray/decoders/overlay.h
+@@ -97,6 +97,13 @@
+ } BD_PG_RLE_ELEM;
+ 
+ /**
++ * bd_overlay_s.pts of the first display of a preloaded Interactive Graphics
++ * page: the page has no presentation time of its own and belongs with the
++ * first picture of the playlist that starts it. -1 means show at once.
++ */
++#define BD_OVERLAY_PTS_WITH_NEXT_VIDEO  (-2)
++
++/**
+  * YUV overlay event
+  */
+ typedef struct bd_overlay_s {

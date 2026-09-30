@@ -113,3 +113,10 @@ src/libbluray/bdnav/clpi_parse.c:if (jj > 0) {:1
 # the two below also occur once in pristine 1.5.0: the count (2) is what catches a dropped hunk
 src/libbluray/bdnav/clpi_parse.c:if (cpi->num_stream_pid < 1 || !cpi->entry) {:2
 src/libbluray/bdnav/navigation.c:if (angle > 8) {:2
+# libbluray-15: first display of a preloaded IG page carries BD_OVERLAY_PTS_WITH_NEXT_VIDEO
+src/libbluray/decoders/overlay.h:#define BD_OVERLAY_PTS_WITH_NEXT_VIDEO  (-2):1
+src/libbluray/decoders/graphics_controller.c:gc->render_pts = param ? BD_OVERLAY_PTS_WITH_NEXT_VIDEO : -1;:1
+src/libbluray/decoders/graphics_controller.c:_flush_osd(gc, BD_OVERLAY_IG, gc->render_pts);:1
+src/libbluray/decoders/graphics_controller.c:int64_t pts = gc->render_pts;:1
+src/libbluray/decoders/graphics_controller.c:p->render_pts = -1;:1
+src/libbluray/bluray.c:_run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);:2
