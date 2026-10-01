@@ -1,0 +1,101 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 1 Oct 2026 18:40:00 -0400
+Subject: [PATCH] clk: mpll: keep G12B on the SDM grid the hardware resolves
+
+The G12B MPLL ignores the least significant bit of its 14-bit SDM: an odd
+SDM_IN runs exactly as the even value above it. Measured on all four
+MPLLs, with the HDMI transmitter's hardware CTS on mpll0 (SPDIF-B) and
+mpll2 (TDM-C), and with the clock-measure block on mpll1/2/3: SDM
+1132=1131, 1130=1129, 1128=1127, 30 ppm apart.
+
+For 48 kHz audio the driver asks for 491.52 MHz and rounds the fraction
+up to SDM 1131, which it reports as -5 ppm but which runs as 1132, -20
+ppm. That is the whole of the G12B passthrough and PCM lip-sync drift
+against the HDMI video clock (about 70 ms an hour).
+
+Add CLK_MESON_MPLL_SDM_EVEN: round to the closest even SDM and report an
+odd one at the rate it runs. G12B's probe sets it on mpll0-3; G12A and
+SM1 share the driver but are not validated and keep today's rounding.
+491.52 MHz becomes SDM 1130, +10 ppm.
+
+---
+--- a/drivers/clk/meson/clk-mpll.h
++++ b/drivers/clk/meson/clk-mpll.h
+@@ -26,6 +26,8 @@
+ 
+ #define CLK_MESON_MPLL_ROUND_CLOSEST	BIT(0)
+ #define CLK_MESON_MPLL_SPREAD_SPECTRUM	BIT(1)
++/* the hardware runs an odd SDM as the even value above it */
++#define CLK_MESON_MPLL_SDM_EVEN		BIT(2)
+ 
+ extern const struct clk_ops meson_clk_mpll_ro_ops;
+ extern const struct clk_ops meson_clk_mpll_ops;
+--- a/drivers/clk/meson/clk-mpll.c
++++ b/drivers/clk/meson/clk-mpll.c
+@@ -9,6 +9,13 @@
+  * scaling capabilities. MPLL rates are calculated as:
+  *
+  * f(N2_integer, SDM_IN ) = 2.0G/(N2_integer + SDM_IN/16384)
++ *
++ * On G12B the SDM's least significant bit has no effect: an odd SDM_IN runs
++ * as the even value above it (measured with the HDMI transmitter's hardware
++ * CTS on mpll0 and mpll2). CLK_MESON_MPLL_SDM_EVEN keeps the driver on the
++ * 2^13 grid the hardware resolves, so the rate it picks and reports is the
++ * rate that runs. Rounding 491.52 MHz up to the unreachable odd code ran
++ * the audio 20 ppm slow; the nearest even code is +10 ppm.
+  */
+ 
+ #include <linux/clk-provider.h>
+@@ -51,7 +58,9 @@
+ 
+ 	frac *= SDM_DEN;
+ 
+-	if (flags & CLK_MESON_MPLL_ROUND_CLOSEST)
++	if (flags & CLK_MESON_MPLL_SDM_EVEN)
++		*sdm = DIV_ROUND_CLOSEST_ULL(frac, 2 * requested_rate) * 2;
++	else if (flags & CLK_MESON_MPLL_ROUND_CLOSEST)
+ 		*sdm = DIV_ROUND_CLOSEST_ULL(frac, requested_rate);
+ 	else
+ 		*sdm = DIV_ROUND_UP_ULL(frac, requested_rate);
+@@ -66,7 +75,7 @@
+ 		*sdm = 0;
+ 	} else if (div > N2_MAX) {
+ 		*n2 = N2_MAX;
+-		*sdm = SDM_DEN - 1;
++		*sdm = SDM_DEN - (flags & CLK_MESON_MPLL_SDM_EVEN ? 2 : 1);
+ 	} else {
+ 		*n2 = div;
+ 	}
+@@ -83,6 +92,10 @@
+ 	sdm = meson_parm_read(clk->map, &mpll->sdm);
+ 	n2 = meson_parm_read(clk->map, &mpll->n2);
+ 
++	/* report the rate the hardware runs, not the one the code names */
++	if (mpll->flags & CLK_MESON_MPLL_SDM_EVEN)
++		sdm = (sdm + 1) & ~1U;
++
+ 	rate = rate_from_params(parent_rate, sdm, n2);
+ 	return rate < 0 ? 0 : rate;
+ }
+--- a/drivers/clk/meson/g12a.c
++++ b/drivers/clk/meson/g12a.c
+@@ -6633,6 +6633,19 @@
+ 		}
+ #endif
+ 
++	/* validated on G12B only; G12A and SM1 keep the upstream rounding */
++	if (of_device_is_compatible(dev->of_node, "amlogic,g12b-clkc")) {
++		struct clk_regmap *const mplls[] = {
++			&g12a_mpll0_div, &g12a_mpll1_div,
++			&g12a_mpll2_div, &g12a_mpll3_div,
++		};
++		int i;
++
++		for (i = 0; i < ARRAY_SIZE(mplls); i++)
++			((struct meson_clk_mpll_data *)mplls[i]->data)->flags |=
++				CLK_MESON_MPLL_SDM_EVEN;
++	}
++
+ 	ret = meson_eeclkc_probe(pdev);
+ 	if (ret)
+ 		return ret;

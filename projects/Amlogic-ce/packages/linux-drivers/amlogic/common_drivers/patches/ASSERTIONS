@@ -143,3 +143,10 @@ drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinf
 drivers/media/vout/hdmitx21/hdmi_tx_main.c:static DEVICE_ATTR_RO(sink_lock);:1
 drivers/media/vout/hdmitx21/hdmi_tx_main.c:ret = device_create_file(dev, &dev_attr_sink_lock);:1
 drivers/media/vout/hdmitx21/hdmi_tx_main.c:if (hdmitx_ddcm_read(0, DDC_SCDC_ADDR, SCDC_STATUS_FLAGS_0, &val, 1,:1
+
+# --- 0020: G12B MPLL rounds to the even SDM grid the hardware resolves ---
+drivers/clk/meson/clk-mpll.h:#define CLK_MESON_MPLL_SDM_EVEN		BIT(2):1
+drivers/clk/meson/clk-mpll.c:*sdm = DIV_ROUND_CLOSEST_ULL(frac, 2 * requested_rate) * 2;:1
+drivers/clk/meson/clk-mpll.c:sdm = (sdm + 1) & ~1U;:1
+drivers/clk/meson/g12a.c:if (of_device_is_compatible(dev->of_node, "amlogic,g12b-clkc")) {:1
+drivers/clk/meson/g12a.c:CLK_MESON_MPLL_SDM_EVEN;:1
