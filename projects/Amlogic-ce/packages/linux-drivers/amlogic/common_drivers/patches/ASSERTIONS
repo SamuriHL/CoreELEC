@@ -150,3 +150,16 @@ drivers/clk/meson/clk-mpll.c:*sdm = DIV_ROUND_CLOSEST_ULL(frac, 2 * requested_ra
 drivers/clk/meson/clk-mpll.c:sdm = (sdm + 1) & ~1U;:1
 drivers/clk/meson/g12a.c:if (of_device_is_compatible(dev->of_node, "amlogic,g12b-clkc")) {:1
 drivers/clk/meson/g12a.c:CLK_MESON_MPLL_SDM_EVEN;:1
+
+# --- 0021: HDMI audio clock trim control ---
+sound/soc/amlogic/auge/audio_pll_trim.c:	.name = "HDMI Audio Clock Trim",:1
+sound/soc/amlogic/auge/audio_pll_trim.c:	return cpu == MESON_CPU_MAJOR_ID_G12B || cpu == MESON_CPU_MAJOR_ID_S6;:1
+sound/soc/amlogic/auge/spdif.c:#define clk_set_rate(clk, rate) aml_pll_set_rate(clk, rate):1
+sound/soc/amlogic/auge/spdif.c:aml_pll_trim_owner(p_spdif, p_spdif->clk_spdifout);:1
+sound/soc/amlogic/auge/spdif.c:aml_pll_trim_release(p_spdif);:1
+sound/soc/amlogic/auge/tdm.c:#define clk_set_rate(clk, rate) aml_pll_set_rate(clk, rate):1
+sound/soc/amlogic/auge/tdm.c:aml_pll_trim_owner(p_tdm, p_tdm->mclk);:1
+sound/soc/amlogic/auge/tdm.c:aml_pll_trim_release(p_tdm);:1
+sound/soc/amlogic/auge/sharebuffer.c:aml_pll_trim_owner(NULL, NULL);:1
+sound/soc/amlogic/auge/card.c:snd_soc_add_card_controls(&priv->snd_card, &aml_pll_trim_control, 1);:1
+sound/soc/amlogic/Makefile:auge/audio_pll_trim.o:1

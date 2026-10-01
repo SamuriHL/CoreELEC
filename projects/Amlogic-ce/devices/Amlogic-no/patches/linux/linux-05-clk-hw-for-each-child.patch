@@ -1,0 +1,52 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 1 Oct 2026 20:30:00 -0400
+Subject: [PATCH] clk: add clk_hw_for_each_child()
+
+A provider that retunes a PLL needs to know what else hangs off it.
+The clk core keeps the children private; walk them under the prepare
+lock.
+
+---
+--- a/drivers/clk/clk.c
++++ b/drivers/clk/clk.c
+@@ -622,6 +622,29 @@
+ }
+ EXPORT_SYMBOL_GPL(clk_hw_rate_is_protected);
+ 
++/**
++ * clk_hw_for_each_child - call @fn for each child of @hw, under the prepare lock
++ * @hw: the parent
++ * @fn: stops the walk and its value is returned when non-zero
++ * @data: passed to @fn
++ */
++int clk_hw_for_each_child(struct clk_hw *hw,
++			  int (*fn)(struct clk_hw *child, void *data), void *data)
++{
++	struct clk_core *child;
++	int ret = 0;
++
++	clk_prepare_lock();
++	hlist_for_each_entry(child, &hw->core->children, child_node) {
++		ret = fn(child->hw, data);
++		if (ret)
++			break;
++	}
++	clk_prepare_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(clk_hw_for_each_child);
++
+ bool clk_hw_is_enabled(const struct clk_hw *hw)
+ {
+ 	return clk_core_is_enabled(hw->core);
+--- a/include/linux/clk-provider.h
++++ b/include/linux/clk-provider.h
+@@ -1236,6 +1236,8 @@
+ bool clk_hw_is_prepared(const struct clk_hw *hw);
+ bool clk_hw_rate_is_protected(const struct clk_hw *hw);
+ bool clk_hw_is_enabled(const struct clk_hw *hw);
++int clk_hw_for_each_child(struct clk_hw *hw,
++			  int (*fn)(struct clk_hw *child, void *data), void *data);
+ bool __clk_is_enabled(struct clk *clk);
+ struct clk *__clk_lookup(const char *name);
+ int __clk_mux_determine_rate(struct clk_hw *hw,

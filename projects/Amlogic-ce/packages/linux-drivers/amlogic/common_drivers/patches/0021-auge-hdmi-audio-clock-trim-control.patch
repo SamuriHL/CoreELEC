@@ -1,0 +1,426 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 1 Oct 2026 20:30:00 -0400
+Subject: [PATCH] auge: HDMI audio clock trim control
+
+A player that holds audio to the video clock needs to move the audio PLL
+by a few ppm while it plays. The existing "SPDIF CLK Fine Setting"
+controls cannot do it safely: they take an absolute rate, leak a clk
+enable per write, and any later clock set by another path silently
+wipes the change.
+
+Add "HDMI Audio Clock Trim" (0.01 ppm, +-100 ppm): [0] trim, [1] trim
+achieved against the PLL's nominal, [2] state. It trims the PLL that is
+the parent of the output that last notified hdmitx (SPDIF or TDM), and
+ends at that stream's hw_free. spdif.c and tdm.c set their clocks
+through aml_pll_set_rate(), under one mutex, which records the rate
+each clock was asked for and re-applies the trim when that PLL is set
+again. A write is refused when the PLL was moved by another writer,
+when a non-audio clock hangs off it, or when the PLL does not read back
+the rate it rounded to. Samesource is not covered.
+
+Only on the SoCs it was validated on (G12B, S6); elsewhere the wrapper
+and hooks are pass-throughs and writes fail with EPERM.
+
+---
+--- a/sound/soc/amlogic/Makefile
++++ b/sound/soc/amlogic/Makefile
+@@ -50,6 +50,7 @@
+ $(MODULE_NAME)-$(CONFIG_AMLOGIC_SND_SOC_AUGE) += auge/tdm_hw.o
+ $(MODULE_NAME)-$(CONFIG_AMLOGIC_SND_SOC_AUGE) += auge/spdif.o
+ $(MODULE_NAME)-$(CONFIG_AMLOGIC_SND_SOC_AUGE) += auge/spdif_hw.o
++$(MODULE_NAME)-$(CONFIG_AMLOGIC_SND_SOC_AUGE) += auge/audio_pll_trim.o
+ 
+ ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ $(MODULE_NAME)-$(CONFIG_AMLOGIC_SND_SOC_AUGE) += auge/pdm.o
+--- a/sound/soc/amlogic/auge/audio_pll_trim.c
++++ b/sound/soc/amlogic/auge/audio_pll_trim.c
+@@ -0,0 +1,260 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * "HDMI Audio Clock Trim": moves the PLL behind the output that last
++ * notified hdmitx by up to +-100 ppm, so a player can hold its audio to the
++ * video clock. Values are in 0.01 ppm: [0] the trim (read/write), [1] the
++ * trim achieved, from the PLL's rate against its nominal (read), [2] the
++ * state (read): 0 no HDMI stream, 1 ready, 2 another writer moved the PLL,
++ * 3 refused (a non-audio clock on the PLL). Only on the SoCs it was
++ * validated on (G12B, S6); elsewhere nothing changes and writes fail.
++ *
++ * spdif.c and tdm.c set their clocks through aml_pll_set_rate(), which
++ * records the rate each clock was asked for and re-applies the trim when
++ * the HDMI PLL is set again. The trim ends when that stream's hw_free runs.
++ */
++
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/math64.h>
++#include <linux/mutex.h>
++#include <linux/sched.h>
++#include <linux/string.h>
++#include <linux/amlogic/cpu_version.h>
++#include <sound/control.h>
++
++#include "audio_pll_trim.h"
++
++#define TRIM_MAX	10000	/* 0.01 ppm: +-100 ppm stays within the PLL's fraction */
++#define TRIM_DEN	100000000LL
++#define REQUESTS	16
++
++enum { TRIM_NONE, TRIM_READY, TRIM_CONTENDED, TRIM_REFUSED };
++
++static DEFINE_MUTEX(pll_lock);
++static struct task_struct *pll_lock_task;
++
++static struct {
++	struct clk_hw *hw;
++	unsigned long rate;
++} requested[REQUESTS];
++
++static struct {
++	const void *owner;
++	struct clk *pll;
++	long trim;
++	unsigned long set;	/* the PLL's rate when this file last saw it set */
++	int state;
++} hdmi;
++
++static bool soc_validated(void)
++{
++	int cpu = get_cpu_type();
++
++	return cpu == MESON_CPU_MAJOR_ID_G12B || cpu == MESON_CPU_MAJOR_ID_S6;
++}
++
++static unsigned long requested_rate(struct clk_hw *hw)
++{
++	int i;
++
++	for (i = 0; i < REQUESTS && requested[i].hw; i++)
++		if (requested[i].hw == hw)
++			return requested[i].rate;
++	return 0;
++}
++
++static void record(struct clk_hw *hw, unsigned long rate)
++{
++	int i;
++
++	for (i = 0; i < REQUESTS && requested[i].hw && requested[i].hw != hw; i++)
++		;
++	if (i < REQUESTS) {
++		requested[i].hw = hw;
++		requested[i].rate = rate;
++	}
++}
++
++static unsigned long trimmed(unsigned long nominal, long trim)
++{
++	return nominal + div_s64((s64)nominal * trim, TRIM_DEN);
++}
++
++static bool is_hdmi_pll(struct clk *clk)
++{
++	return hdmi.pll && clk_is_match(clk, hdmi.pll);
++}
++
++/* caller holds pll_lock */
++static void restore(void)
++{
++	unsigned long nominal;
++
++	if (!hdmi.pll || !hdmi.trim)
++		return;
++	nominal = requested_rate(__clk_get_hw(hdmi.pll));
++	if (nominal)
++		clk_set_rate(hdmi.pll, nominal);
++	hdmi.trim = 0;
++}
++
++int aml_pll_set_rate(struct clk *clk, unsigned long rate)
++{
++	int ret;
++
++	/*
++	 * Elsewhere today's behaviour: the auge rate notifiers are live on some
++	 * SoCs and would take pll_lock under the clk prepare lock. On the
++	 * validated SoCs only a set made here can be on this task's stack.
++	 */
++	if (!soc_validated() || pll_lock_task == current)
++		return clk_set_rate(clk, rate);
++
++	mutex_lock(&pll_lock);
++	pll_lock_task = current;
++	record(__clk_get_hw(clk), rate);
++	if (is_hdmi_pll(clk) && hdmi.trim)
++		rate = trimmed(rate, hdmi.trim);
++	ret = clk_set_rate(clk, rate);
++	if (is_hdmi_pll(clk))
++		hdmi.set = clk_get_rate(clk);
++	pll_lock_task = NULL;
++	mutex_unlock(&pll_lock);
++	return ret;
++}
++
++void aml_pll_trim_owner(const void *owner, struct clk *out)
++{
++	struct clk *pll = out ? clk_get_parent(out) : NULL;
++
++	if (!soc_validated())
++		return;
++	mutex_lock(&pll_lock);
++	if (hdmi.pll && !(pll && clk_is_match(pll, hdmi.pll)))
++		restore();
++	hdmi.owner = pll ? owner : NULL;
++	hdmi.pll = pll;
++	hdmi.set = pll ? clk_get_rate(pll) : 0;
++	hdmi.state = pll ? TRIM_READY : TRIM_NONE;
++	mutex_unlock(&pll_lock);
++}
++
++void aml_pll_trim_release(const void *owner)
++{
++	if (!soc_validated())
++		return;
++	mutex_lock(&pll_lock);
++	if (owner && hdmi.owner == owner) {
++		restore();
++		hdmi.owner = NULL;
++		hdmi.pll = NULL;
++		hdmi.set = 0;
++		hdmi.state = TRIM_NONE;
++	}
++	mutex_unlock(&pll_lock);
++}
++
++static int audio_child(struct clk_hw *child, void *data)
++{
++	const char *name = clk_hw_get_name(child);
++
++	if (!clk_hw_is_enabled(child))
++		return 0;
++	if (name && (!strncmp(name, "spdifout", 8) || !strncmp(name, "mclk_", 5)))
++		return 0;
++	pr_warn("%s: %s on the HDMI audio PLL is not an audio clock\n", __func__, name);
++	return -EPERM;
++}
++
++static int trim_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count = 3;
++	uinfo->value.integer.min = -TRIM_MAX;
++	uinfo->value.integer.max = TRIM_MAX;
++	return 0;
++}
++
++static int trim_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
++{
++	unsigned long nominal = 0;
++
++	mutex_lock(&pll_lock);
++	if (hdmi.pll)
++		nominal = requested_rate(__clk_get_hw(hdmi.pll));
++	ucontrol->value.integer.value[0] = hdmi.trim;
++	ucontrol->value.integer.value[1] = nominal ?
++		div_s64(((s64)hdmi.set - (s64)nominal) * TRIM_DEN, nominal) : 0;
++	ucontrol->value.integer.value[2] = hdmi.state;
++	mutex_unlock(&pll_lock);
++	return 0;
++}
++
++static int trim_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
++{
++	long trim = ucontrol->value.integer.value[0];
++	unsigned long nominal, target, expect, got;
++	int ret;
++
++	if (trim < -TRIM_MAX || trim > TRIM_MAX)
++		return -EINVAL;
++
++	if (!soc_validated())
++		return -EPERM;
++	mutex_lock(&pll_lock);
++	pll_lock_task = current;
++	if (!hdmi.pll) {
++		ret = -EBADFD;
++		goto out;
++	}
++	if (clk_hw_for_each_child(__clk_get_hw(hdmi.pll), audio_child, NULL)) {
++		hdmi.state = TRIM_REFUSED;
++		ret = -EPERM;
++		goto out;
++	}
++	nominal = requested_rate(__clk_get_hw(hdmi.pll));
++	if (!nominal) {
++		ret = -ENODATA;
++		goto out;
++	}
++	if (clk_get_rate(hdmi.pll) != hdmi.set) {
++		hdmi.state = TRIM_CONTENDED;
++		ret = -EBUSY;
++		goto out;
++	}
++	if (trim == hdmi.trim) {
++		ret = 0;
++		goto out;
++	}
++
++	target = trimmed(nominal, trim);
++	expect = clk_round_rate(hdmi.pll, target);
++	ret = clk_set_rate(hdmi.pll, target);
++	got = clk_get_rate(hdmi.pll);
++	if (ret || got != expect) {
++		/* the PLL did not take the rate it promised (e.g. a skipped fraction) */
++		pr_warn("%s: asked %lu, expected %lu, got %lu (%d)\n",
++			__func__, target, expect, got, ret);
++		clk_set_rate(hdmi.pll, nominal);
++		hdmi.trim = 0;
++		hdmi.set = clk_get_rate(hdmi.pll);
++		ret = ret ? ret : -EIO;
++		goto out;
++	}
++	hdmi.trim = trim;
++	hdmi.set = got;
++	hdmi.state = TRIM_READY;
++	ret = 1;
++out:
++	pll_lock_task = NULL;
++	mutex_unlock(&pll_lock);
++	return ret;
++}
++
++const struct snd_kcontrol_new aml_pll_trim_control = {
++	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
++	.name = "HDMI Audio Clock Trim",
++	.info = trim_info,
++	.get = trim_get,
++	.put = trim_put,
++};
+--- a/sound/soc/amlogic/auge/audio_pll_trim.h
++++ b/sound/soc/amlogic/auge/audio_pll_trim.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: (GPL-2.0+ OR MIT) */
++/*
++ * Trim of the audio PLL that feeds HDMI, for a player that follows the
++ * video clock.
++ */
++
++#ifndef __AML_AUDIO_PLL_TRIM_H__
++#define __AML_AUDIO_PLL_TRIM_H__
++
++#include <linux/clk.h>
++#include <sound/control.h>
++
++int aml_pll_set_rate(struct clk *clk, unsigned long rate);
++void aml_pll_trim_owner(const void *owner, struct clk *out);
++void aml_pll_trim_release(const void *owner);
++
++extern const struct snd_kcontrol_new aml_pll_trim_control;
++
++#endif
+--- a/sound/soc/amlogic/auge/card.c
++++ b/sound/soc/amlogic/auge/card.c
+@@ -28,6 +28,7 @@
+ #include <linux/amlogic/pm.h>
+ #endif
+ #include "card.h"
++#include "audio_pll_trim.h"
+ 
+ #include "effects.h"
+ #include "iomap.h"
+@@ -1579,6 +1580,9 @@
+ 
+ 	snd_soc_add_card_controls(&priv->snd_card, snd_user_controls,
+ 				  ARRAY_SIZE(snd_user_controls));
++#ifdef CONFIG_AMLOGIC_HDMITX
++	snd_soc_add_card_controls(&priv->snd_card, &aml_pll_trim_control, 1);
++#endif
+ #ifdef CONFIG_AMLOGIC_ZAPPER_CUT
+ 	priv->drc_control = 0x3; //RF mode
+ #endif
+--- a/sound/soc/amlogic/auge/sharebuffer.c
++++ b/sound/soc/amlogic/auge/sharebuffer.c
+@@ -16,6 +16,7 @@
+ #include "spdif_hw.h"
+ #include "earc.h"
+ #include "card.h"
++#include "audio_pll_trim.h"
+ 
+ struct samesrc_ops *samesrc_ops_table[SHAREBUFFER_SRC_NUM];
+ 
+@@ -88,6 +89,8 @@
+ 			enable_spdif_to_hdmitx_clk(true);
+ 		enable_spdif_to_hdmitx_dat(false);
+ 		aout_notifier_call_chain(AOUT_EVENT_IEC_60958_PCM, &aud_param);
++		/* samesource is not validated for the trim */
++		aml_pll_trim_owner(NULL, NULL);
+ 		enable_spdif_to_hdmitx_dat(true);
+ 	}
+ 	return 0;
+--- a/sound/soc/amlogic/auge/spdif.c
++++ b/sound/soc/amlogic/auge/spdif.c
+@@ -43,6 +43,10 @@
+ #include "card.h"
+ #include "audio_controller.h"
+ #include "audio_uevent.h"
++#include "audio_pll_trim.h"
++
++/* every clock set here goes through the HDMI trim bookkeeping */
++#define clk_set_rate(clk, rate) aml_pll_set_rate(clk, rate)
+ 
+ #define DRV_NAME "snd_spdif"
+ 
+@@ -262,6 +266,8 @@
+ 	if (get_hdmitx_audio_src(rtd->card) == spdif_id) {
+ 		pr_info("hdmitx src switch to spdif %d\n", spdif_id);
+ 		set_spdif_to_hdmitx_id(spdif_id);
++		/* samesource is not validated for the trim */
++		aml_pll_trim_owner(NULL, NULL);
+ 	}
+ 
+ 	sharebuffer_prepare(substream,
+@@ -1403,6 +1409,7 @@
+ 		if (get_hdmitx_audio_src(rtd->card) == p_spdif->id) {
+ 			/* notify to hdmitx */
+ 			spdif_notify_to_hdmitx(substream, p_spdif->codec_type);
++			aml_pll_trim_owner(p_spdif, p_spdif->clk_spdifout);
+ 			enable_spdif_to_hdmitx_dat(true);
+ 		}
+ 		if (p_spdif->samesource_sel != SHAREBUFFER_NONE)
+@@ -1590,6 +1597,8 @@
+ {
+ 	struct aml_spdif *p_spdif = snd_soc_dai_get_drvdata(cpu_dai);
+ 
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
++		aml_pll_trim_release(p_spdif);
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
+ 	    p_spdif->samesource_sel != SHAREBUFFER_NONE)
+ 		spdif_sharebuffer_free(p_spdif, substream);
+--- a/sound/soc/amlogic/auge/tdm.c
++++ b/sound/soc/amlogic/auge/tdm.c
+@@ -53,6 +53,10 @@
+ #include "audio_utils.h"
+ #include "card.h"
+ #include "audio_controller.h"
++#include "audio_pll_trim.h"
++
++/* every clock set here goes through the HDMI trim bookkeeping */
++#define clk_set_rate(clk, rate) aml_pll_set_rate(clk, rate)
+ 
+ #define DRV_NAME "snd_tdm"
+ 
+@@ -2216,6 +2220,7 @@
+ 				runtime->rate, bit_depth, 0);
+ 			set_aud_param_ch_status(&chsts, &aud_param, codec_type);
+ 			aout_notifier_call_chain(event_type, &aud_param);
++			aml_pll_trim_owner(p_tdm, p_tdm->mclk);
+ 		}
+ 
+ 		fifo_id = aml_frddr_get_fifo_id(fr);
+@@ -2499,6 +2504,7 @@
+ #endif
+ 	/* share buffer free */
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		aml_pll_trim_release(p_tdm);
+ 		if (p_tdm->samesource_sel != SHAREBUFFER_NONE)
+ 			tdm_sharebuffer_free(p_tdm, substream);
+ 	}
