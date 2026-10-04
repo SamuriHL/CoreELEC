@@ -1,0 +1,672 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: a playlist player starts at its presentation
+
+A BD-J application starts a playlist player (Player.start()) and libbluray
+fires the JMF StartEvent and starts the media clock at once, when the
+reader starts. The player shows the first picture later: it reads ahead,
+and may change the display mode first (several seconds). Applications time
+their own UI from StartEvent with wall-clock timers - M3GAN 2.0 opens its
+menu bar 1.5 s after StartEvent and closes it 7 s later - so the viewer
+sees what is left of it once the picture appears.
+
+Opt-in with bd_bdj_set_defer_start() (requires presentation timing, patch
+13). The playlist player's C start (bdpriv_select_rate(START)) takes the
+start position and queues a start marker under bd->mutex, before the
+reader runs. The application's StartEvent, MediaPresentedEvent and media
+clock wait until the player releases the marker - presents the first
+picture - with the start instant it passes (bd_bdj_release_ex). The
+reader's statuses for the start are buffered behind StartEvent. An
+application action on the player (stop, seek, rate, close) delivers the
+start first. A player flush keeps a held start's own items
+(BD_BDJ_RELEASE_FLUSH). A start not reported within 15 s starts anyway,
+logged as an error.
+
+Replaces patch 16 (shifting the media clock over a held start), which
+moved only JMF media time and never the application's timers.
+
+---
+diff --git a/src/libbluray/bdj/bdj.c b/src/libbluray/bdj/bdj.c
+index a42ef0c..3d726e8 100644
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -1193,6 +1193,8 @@ int bdj_process_event(BDJAVA *bdjava, unsigned ev, unsigned param)
+         /* 16 */ "VK_KEY",
+         /* 17 */ "UO_MASKED",
+         /* 18 */ "MOUSE",
++
++        /* 19 */ "PRESENTATION_START",
+     };
+ 
+     JNIEnv* env;
+diff --git a/src/libbluray/bdj/bdj.h b/src/libbluray/bdj/bdj.h
+index 43b0132..7727bca 100644
+--- a/src/libbluray/bdj/bdj.h
++++ b/src/libbluray/bdj/bdj.h
+@@ -59,7 +59,11 @@ typedef enum {
+     BDJ_EVENT_UO_MASKED        = 17,
+     BDJ_EVENT_MOUSE            = 18,
+ 
+-    BDJ_EVENT_LAST             = 18,
++    /* Player-internal: the player presented the first picture of a playlist
++     * player start (param: start generation) */
++    BDJ_EVENT_PRESENTATION_START = 19,
++
++    BDJ_EVENT_LAST             = 19,
+ 
+ } BDJ_EVENT;
+ 
+diff --git a/src/libbluray/bdj/java/org/videolan/Libbluray.java b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+index 8185620..8cc212c 100644
+--- a/src/libbluray/bdj/java/org/videolan/Libbluray.java
++++ b/src/libbluray/bdj/java/org/videolan/Libbluray.java
+@@ -645,6 +645,12 @@ public class Libbluray {
+         return tellTimeN(nativePointer);
+     }
+ 
++    /* start at presentation: 0 start generation, 1 its title time (90 kHz),
++     * 2 the presented generation, 3 its first picture (CLOCK_MONOTONIC ns, 0 = at delivery) */
++    public static long presentationInfo(int which) {
++        return presentationInfoN(nativePointer, which);
++    }
++
+     public static boolean selectRate(float rate) {
+         return selectRateN(nativePointer, rate, 0) == 1 ? true : false;
+     }
+@@ -780,6 +786,7 @@ public class Libbluray {
+         case BDJ_EVENT_UO_MASKED:
+         case BDJ_EVENT_SEEK:
+         case BDJ_EVENT_RATE:
++        case BDJ_EVENT_PRESENTATION_START:
+             result = PlayerManager.getInstance().onEvent(event, param);
+             break;
+ 
+@@ -884,6 +891,8 @@ public class Libbluray {
+     public  static final int BDJ_EVENT_UO_MASKED                = 17;
+     private static final int BDJ_EVENT_MOUSE                    = 18;
+ 
++    public  static final int BDJ_EVENT_PRESENTATION_START       = 19;
++
+     public static final int AACS_DISC_ID           = 1;
+     public static final int AACS_MEDIA_VID         = 2;
+     public static final int AACS_MEDIA_PMSN        = 3;
+@@ -905,6 +914,7 @@ public class Libbluray {
+     private static native void setUOMaskN(long np, boolean menuCallMask, boolean titleSearchMask);
+     private static native void setKeyInterestN(long np, int mask);
+     private static native long tellTimeN(long np);
++    private static native long presentationInfoN(long np, int which);
+     private static native int selectRateN(long np, float rate, int reason);
+     private static native int writeRegN(long np, int is_psr, int num, int value, int psr_value_mask);
+     private static native int readRegN(long np, int is_psr, int num);
+diff --git a/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java b/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
+index 2d5c700..ac591e2 100644
+--- a/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
++++ b/src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java
+@@ -59,6 +59,10 @@ import org.davic.media.MediaTimePositionChangedEvent;
+ 
+ import org.bluray.media.OverallGainControl;
+ 
++import java.util.LinkedList;
++import java.util.Timer;
++import java.util.TimerTask;
++
+ import org.videolan.BDJAction;
+ import org.videolan.BDJActionManager;
+ import org.videolan.BDJActionQueue;
+@@ -193,10 +197,19 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+         postStopTimeChangeEvent();
+     }
+ 
++    /* the media time of a started player; it stands still while the start waits
++     * for its first picture, and until that picture's instant */
++    private long startedNanoseconds() {
++        long now = getTimeBase().getNanoseconds();
++        if (startPending || now < baseTime)
++            return baseMediaTime;
++        return baseMediaTime + (now - baseTime);
++    }
++
+     public Time getMediaTime() {
+         synchronized (this) {
+             if (state == Started)
+-                return new Time((baseMediaTime + (getTimeBase().getNanoseconds() - baseTime)) / 1000000000.0d);
++                return new Time(startedNanoseconds() / 1000000000.0d);
+             else
+                 return new Time(baseMediaTime / 1000000000.0d);
+         }
+@@ -205,7 +218,7 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+     public long getMediaNanoseconds() {
+         synchronized (this) {
+             if ((state == Started) && (rate != 0.0f))
+-                return baseMediaTime + (getTimeBase().getNanoseconds() - baseTime);
++                return startedNanoseconds();
+             else
+                 return baseMediaTime;
+         }
+@@ -240,7 +253,9 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+ 
+     protected void updateTime(Time now) {
+         baseMediaTime = now.getNanoseconds();
+-        baseTime = getTimeBase().getNanoseconds();
++        /* a start waiting for its first picture keeps its clock stopped */
++        if (!startPending)
++            baseTime = getTimeBase().getNanoseconds();
+     }
+ 
+     public float getRate() {
+@@ -346,6 +361,113 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+         return true;
+     }
+ 
++    /*
++     * Start at presentation (libbluray presentation timing with deferred start).
++     *
++     * The playlist player starts reading at once, but the player shows its
++     * first picture later: it reads ahead, and may change the display mode
++     * first. A StartEvent is "the media is playing"; applications time their
++     * own UI from it. So the StartEvent, MediaPresentedEvent and the media
++     * clock wait for the player's release of the start's marker (the first
++     * picture), with the reader's statuses for the start buffered behind them.
++     */
++
++    private void beginPendingStart(Time at) {
++        startPending = true;
++        pendingGen = deferredStartGen;
++        pendingAt = at;
++        pendingSince = System.currentTimeMillis();
++        heldStatus.clear();
++        if (pendingTask != null)
++            pendingTask.cancel();
++        pendingTask = new TimerTask() {
++            public void run() {
++                if (isClosed) {
++                    cancel();
++                    return;
++                }
++                commandQueue.put(new PlayerAction(BDHandler.this, PlayerAction.ACTION_STATUS,
++                                                  Integer.valueOf(PRESENTATION_POLL), 0));
++            }
++        };
++        pendingTimer().schedule(pendingTask, 100, 100);
++        logger.info("start " + pendingGen + " waits for its first picture");
++    }
++
++    private void resolvePendingStart(String how, boolean presented) {
++        long waited;
++        synchronized (this) {
++            if (!startPending)
++                return;
++            long startNs = 0;
++            if (presented && Libbluray.presentationInfo(2) == pendingGen)
++                startNs = Libbluray.presentationInfo(3);
++            baseTime = getTimeBase().getNanoseconds();
++            if (startNs != 0)
++                baseTime -= System.nanoTime() - startNs;
++            startPending = false;
++            waited = System.currentTimeMillis() - pendingSince;
++        }
++        if (pendingTask != null) {
++            pendingTask.cancel();
++            pendingTask = null;
++        }
++        logger.info("start " + pendingGen + " " + how + " after " + waited + " ms" +
++                    " (media clock starts " + ((baseTime - getTimeBase().getNanoseconds()) / 1000000L) + " ms from now)");
++        notifyListeners(new StartEvent(this, Prefetched, Started, Started, pendingAt, getMediaTime()));
++        // Send MediaPresentedEvent after StartEvent - some discs rely on this to show menus
++        notifyListeners(new MediaPresentedEvent(this));
++        while (!heldStatus.isEmpty()) {
++            int[] status = (int[])heldStatus.removeFirst();
++            handleStatus(status[0], status[1]);
++        }
++    }
++
++    /* an application action on a player whose start waits: the start is the
++     * application's past, so it happens first */
++    protected void endPendingStart(String action) {
++        if (startPending)
++            resolvePendingStart("ended by " + action, false);
++    }
++
++    private void onStatus(int event, int param) {
++        if (event == Libbluray.BDJ_EVENT_PRESENTATION_START) {
++            if (startPending && (param & 0xffffffffL) == pendingGen)
++                resolvePendingStart("presented", true);
++            return;
++        }
++        if (event == PRESENTATION_POLL) {
++            if (!startPending)
++                return;
++            if (Libbluray.presentationInfo(2) == pendingGen) {
++                resolvePendingStart("presented (poll)", true);
++            } else if (System.currentTimeMillis() - pendingSince > PENDING_START_LIMIT_MS) {
++                logger.error("start " + pendingGen + ": no first picture reported in " + PENDING_START_LIMIT_MS + " ms, starting anyway");
++                resolvePendingStart("fallback", false);
++            }
++            return;
++        }
++        if (startPending) {
++            switch (event) {
++            case Libbluray.BDJ_EVENT_SEEK:
++            case Libbluray.BDJ_EVENT_PLAYLIST:
++                /* the reader's own start position: the start already holds it */
++            case Libbluray.BDJ_EVENT_PTS:
++                return;
++            default:
++                heldStatus.addLast(new int[] { event, param });
++                return;
++            }
++        }
++        handleStatus(event, param);
++    }
++
++    private static synchronized Timer pendingTimer() {
++        if (pendingStartTimer == null)
++            pendingStartTimer = new Timer(true);
++        return pendingStartTimer;
++    }
++
+     /*
+      * handling of notifications from app
+      */
+@@ -520,8 +642,17 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+                 return false;
+             /* fall thru */
+         case Prefetched:
++            deferredStartGen = 0;
+             ControllerErrorEvent error = doStart(at);
+             if (error == null) {
++                if (deferredStartGen != 0) {
++                    /* the clock is stopped before the player reads as Started */
++                    synchronized (this) {
++                        beginPendingStart(at);
++                        state = Started;
++                    }
++                    break;
++                }
+                 state = Started;
+                 notifyListeners(new StartEvent(this, Prefetched, Started, Started, at, getMediaTime()));
+                 // Send MediaPresentedEvent after StartEvent - some discs rely on this to show menus
+@@ -532,6 +663,9 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+             }
+             break;
+         default:
++            /* started again while the first start waits: its StartEvent is still to come */
++            if (startPending)
++                break;
+             notifyListeners(new StartEvent(this, state, state, state, at, getMediaTime()));
+             break;
+         }
+@@ -622,24 +756,58 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+                 player.doStartAction((param == null) ? null : (Time)param);
+                 break;
+             case ACTION_STOP:
++                player.endPendingStart("stop");
+                 player.doStopAction();
+                 break;
+             case ACTION_DEALLOCATE:
++                player.endPendingStart("deallocate");
+                 player.doDeallocateAction();
+                 break;
+             case ACTION_CLOSE:
++                player.endPendingStart("close");
+                 player.doCloseAction();
+                 break;
+ 
+             case ACTION_SEEK_TIME:
++                player.endPendingStart("seek");
+                 player.doSeekTime((Time)param);
+                 break;
+             case ACTION_SET_RATE:
++                player.endPendingStart("rate change");
+                 player.doSetRate((Float)param);
+                 break;
+ 
+             case ACTION_STATUS:
+-                switch (((Integer)param).intValue()) {
++                player.onStatus(((Integer)param).intValue(), param2);
++                break;
++            default:
++                System.err.println("Unknown action " + action);
++                break;
++            }
++        }
++
++        private BDHandler player;
++        private int action;
++        private Object param;
++        private int param2;
++
++        public static final int ACTION_INIT = 1;
++        public static final int ACTION_REALIZE = 2;
++        public static final int ACTION_PREFETCH = 3;
++        public static final int ACTION_START = 4;
++        public static final int ACTION_STOP = 5;
++        public static final int ACTION_DEALLOCATE = 6;
++        public static final int ACTION_CLOSE = 7;
++
++        public static final int ACTION_SEEK_TIME = 8;
++        public static final int ACTION_SET_RATE = 9;
++
++        public static final int ACTION_STATUS = 10;
++    }
++
++    private void handleStatus(int event, int param2) {
++                BDHandler player = this;
++                switch (event) {
+                 case Libbluray.BDJ_EVENT_CHAPTER:
+                     player.doChapterReached(param2);
+                     break;
+@@ -684,33 +852,9 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+                     player.doRateChanged(rate);
+                     break;
+                 default:
+-                    System.err.println("Unknown ACTION_STATUS: id " + param + ", value " + param2);
++                    System.err.println("Unknown ACTION_STATUS: id " + event + ", value " + param2);
+                     break;
+                 }
+-                break;
+-            default:
+-                System.err.println("Unknown action " + action);
+-                break;
+-            }
+-        }
+-
+-        private BDHandler player;
+-        private int action;
+-        private Object param;
+-        private int param2;
+-
+-        public static final int ACTION_INIT = 1;
+-        public static final int ACTION_REALIZE = 2;
+-        public static final int ACTION_PREFETCH = 3;
+-        public static final int ACTION_START = 4;
+-        public static final int ACTION_STOP = 5;
+-        public static final int ACTION_DEALLOCATE = 6;
+-        public static final int ACTION_CLOSE = 7;
+-
+-        public static final int ACTION_SEEK_TIME = 8;
+-        public static final int ACTION_SET_RATE = 9;
+-
+-        public static final int ACTION_STATUS = 10;
+     }
+ 
+     protected int state = Unrealized;
+@@ -726,6 +870,19 @@ public abstract class BDHandler implements Player, ServiceContentHandler {
+ 
+     protected BDJActionQueue commandQueue;
+ 
++    /* start at presentation */
++    protected long deferredStartGen = 0;  /* set by doStart when libbluray deferred the start */
++    private boolean startPending = false;
++    private long pendingGen = 0;
++    private Time pendingAt = null;
++    private long pendingSince = 0;
++    private LinkedList heldStatus = new LinkedList();
++    private TimerTask pendingTask = null;
++    private static Timer pendingStartTimer = null;
++    private static final int PRESENTATION_POLL = -1000;
++    private static final long PENDING_START_LIMIT_MS = 15000;
++    private static final Logger logger = Logger.getLogger(BDHandler.class.getName());
++
+     public static final double TO_SECONDS = 1 / 90000.0d;
+     public static final double FROM_SECONDS = 90000.0d;
+     public static final double TO_NAROSECONDS = 1000000 / 90.0d;
+diff --git a/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java b/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
+index 83cbddd..9dcecfa 100644
+--- a/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
++++ b/src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java
+@@ -187,13 +187,21 @@ public class Handler extends BDHandler {
+                 }
+             }
+ 
++            final long gen = Libbluray.presentationInfo(0);
+             try {
+                 Libbluray.selectRate(rate, true);
+             } catch (Exception e) {
+                 return new ConnectionErrorEvent(this);
+             }
+ 
+-            at = new Time(Libbluray.tellTime() * TO_SECONDS);
++            if (Libbluray.presentationInfo(0) != gen) {
++                /* the start waits for its first picture (presentation timing):
++                 * its position was taken at the start, before the reader ran */
++                deferredStartGen = Libbluray.presentationInfo(0);
++                at = new Time(Libbluray.presentationInfo(1) * TO_SECONDS);
++            } else {
++                at = new Time(Libbluray.tellTime() * TO_SECONDS);
++            }
+             return super.doStart(at);
+         }
+     }
+@@ -465,6 +473,7 @@ public class Handler extends BDHandler {
+         }
+ 
+         protected void doAction() {
++            player.endPendingStart(action == ACTION_SEEK_MARK ? "seek mark" : "seek playitem");
+             switch (action) {
+             case ACTION_SEEK_MARK:
+                 if ((player.getState() == Prefetched) || (player.getState() == Started)) {
+diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
+index 0771c23..71fa94f 100644
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.c
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c
+@@ -338,6 +338,12 @@ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
+     return bdpriv_bdj_tell_time(bd);
+ }
+ 
++JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_presentationInfoN(JNIEnv * env,
++        jclass cls, jlong np, jint which) {
++    BLURAY* bd = (BLURAY*)(intptr_t)np;
++    return bdpriv_bdj_presentation_info(bd, which);
++}
++
+ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
+         jclass cls, jlong np, jfloat rate, jint reason) {
+     BLURAY* bd = (BLURAY*)(intptr_t)np;
+@@ -739,6 +745,11 @@ Java_org_videolan_Libbluray_methods[] =
+         CC("(J)J"),
+         VC(Java_org_videolan_Libbluray_tellTimeN),
+     },
++    {
++        CC("presentationInfoN"),
++        CC("(JI)J"),
++        VC(Java_org_videolan_Libbluray_presentationInfoN),
++    },
+     {
+         CC("selectRateN"),
+         CC("(JFI)I"),
+diff --git a/src/libbluray/bdj/native/org_videolan_Libbluray.h b/src/libbluray/bdj/native/org_videolan_Libbluray.h
+index aff3ee3..25557b7 100644
+--- a/src/libbluray/bdj/native/org_videolan_Libbluray.h
++++ b/src/libbluray/bdj/native/org_videolan_Libbluray.h
+@@ -188,6 +188,14 @@ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectAngleN
+ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_soundEffectN
+   (JNIEnv *, jclass, jlong, jint);
+ 
++/*
++ * Class:     org_videolan_Libbluray
++ * Method:    presentationInfoN
++ * Signature: (JI)J
++ */
++JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_presentationInfoN
++  (JNIEnv *, jclass, jlong, jint);
++
+ /*
+  * Class:     org_videolan_Libbluray
+  * Method:    tellTimeN
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 87fb614..1d4dc17 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -185,6 +185,19 @@ struct bluray {
+         uint32_t param;
+         uint64_t title_time;
+     } bdj_pt_queue[256];
++    /* A BD-J playlist player's start, presented (bd_bdj_set_defer_start()).
++     * The C start of a playlist player (bdpriv_select_rate(START)) opens a
++     * start generation and queues a marker; the application's StartEvent and
++     * media clock wait until the player releases that marker, i.e. presents
++     * the first picture of the start. */
++    uint8_t         bdj_defer_start;
++    uint8_t         bdj_start_unresolved;
++    uint32_t        bdj_start_gen;
++    uint32_t        bdj_start_seq;          /* queue seq of the start marker */
++    uint64_t        bdj_start_title_time;   /* title time at the C start, 1/90000 s */
++    uint32_t        bdj_presented_gen;
++    int64_t         bdj_presented_start_ns; /* CLOCK_MONOTONIC ns of the first picture, 0 = at delivery */
++    int64_t         bdj_release_start_ns;   /* start instant passed with the current release */
+     uint8_t         uo_restriction_level; /* 0 to ignore UO restrictions */
+ 
+     /* HDMV */
+@@ -1407,8 +1420,21 @@ void bdpriv_select_rate(BLURAY *bd, float rate, int reason)
+     }
+ 
+     if (reason == BDJ_PLAYBACK_START) {
++        bd_mutex_lock(&bd->mutex);
++        /* Under the mutex and before the reader may run: the start position
++         * is exact, and the start marker precedes everything the start reads. */
++        if (bd->bdj_defer_start && _bdj_pt_active(bd) && bd->title) {
++            bd->bdj_start_gen++;
++            bd->bdj_start_title_time = bd_tell_time(bd);
++            _bdj_pt_push(bd, 0, BDJ_EVENT_PRESENTATION_START, bd->bdj_start_gen, 0);
++            bd->bdj_start_seq        = bd->bdj_pt_seq;
++            bd->bdj_start_unresolved = 1;
++            BD_DEBUG(DBG_BLURAY, "BD-J start %u at title time %" PRIu64 " held for presentation (seq %u)\n",
++                     bd->bdj_start_gen, bd->bdj_start_title_time, bd->bdj_start_seq);
++        }
+         /* playback is triggered by bdpriv_select_rate() */
+         bd->bdj_wait_start = 0;
++        bd_mutex_unlock(&bd->mutex);
+     }
+ 
+     if (rate < 0.5) {
+@@ -1646,6 +1672,16 @@ static void _bdj_pt_deliver(BLURAY *bd, unsigned idx)
+         bd->bdj_pt_presented_valid = 1;
+         /* the write callback delivers BDJ_EVENT_PTS */
+         bd_psr_write(bd->regs, PSR_TIME, bd->bdj_pt_queue[idx].param);
++    } else if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_PRESENTATION_START) {
++        /* the first picture of a start: an older generation is history */
++        if (bd->bdj_pt_queue[idx].param == bd->bdj_start_gen && bd->bdj_start_unresolved) {
++            bd->bdj_start_unresolved   = 0;
++            bd->bdj_presented_gen      = bd->bdj_start_gen;
++            bd->bdj_presented_start_ns = bd->bdj_release_start_ns;
++            if (bd->bdjava != NULL) {
++                bdj_process_event(bd->bdjava, BDJ_EVENT_PRESENTATION_START, bd->bdj_start_gen);
++            }
++        }
+     } else {
+         if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_PLAYITEM) {
+             bd->bdj_pt_playitem       = bd->bdj_pt_queue[idx].param;
+@@ -4330,6 +4366,57 @@ void bd_bdj_release_all(BLURAY *bd)
+     bd_mutex_unlock(&bd->mutex);
+ }
+ 
++void bd_bdj_set_defer_start(BLURAY *bd, int enable)
++{
++    bd_mutex_lock(&bd->mutex);
++    bd->bdj_defer_start = !!enable;
++    bd_mutex_unlock(&bd->mutex);
++}
++
++int bd_bdj_start_pending(BLURAY *bd, uint32_t *start_seq)
++{
++    int pending;
++    bd_mutex_lock(&bd->mutex);
++    pending = bd->bdj_start_unresolved && bd->bdj_pt_count > 0 && bd->title_type == title_bdj;
++    if (pending && start_seq) {
++        *start_seq = bd->bdj_start_seq;
++    }
++    bd_mutex_unlock(&bd->mutex);
++    return pending;
++}
++
++void bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags)
++{
++    bd_mutex_lock(&bd->mutex);
++    if ((flags & BD_BDJ_RELEASE_FLUSH) && bd->bdj_start_unresolved) {
++        /* a flush ahead of a start: the start's own entries wait for it */
++        const uint32_t before = bd->bdj_start_seq - 1;
++        if ((flags & BD_BDJ_RELEASE_ALL) || (int32_t)(seq - before) > 0) {
++            seq = before;
++        }
++        flags &= ~BD_BDJ_RELEASE_ALL;
++    }
++    bd->bdj_release_start_ns = start_ns;
++    _bdj_pt_release(bd, seq, (flags & BD_BDJ_RELEASE_ALL) ? 1 : 0);
++    bd->bdj_release_start_ns = 0;
++    bd_mutex_unlock(&bd->mutex);
++}
++
++int64_t bdpriv_bdj_presentation_info(BLURAY *bd, int which)
++{
++    int64_t v = 0;
++    bd_mutex_lock(&bd->mutex);
++    switch (which) {
++        case 0: v = bd->bdj_start_gen; break;
++        case 1: v = (int64_t)bd->bdj_start_title_time; break;
++        case 2: v = bd->bdj_presented_gen; break;
++        case 3: v = bd->bdj_presented_start_ns; break;
++        default: break;
++    }
++    bd_mutex_unlock(&bd->mutex);
++    return v;
++}
++
+ uint64_t bdpriv_bdj_tell_time(BLURAY *bd)
+ {
+     uint64_t t = 0;
+diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+index 50e26fe..4132186 100644
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1183,6 +1183,38 @@ BD_PUBLIC void     bd_bdj_release(BLURAY *bd, uint32_t seq);
+  */
+ BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
+ 
++/*
++ * BD-J start at presentation (requires presentation timing).
++ *
++ * A BD-J application starts a playlist player before the player can show its
++ * first picture (the reader runs ahead; a player may change the display mode
++ * first). When enabled, the application's StartEvent and media clock wait for
++ * that picture: the playlist player's start queues a marker, and the player's
++ * release of the marker (the picture reached the start) delivers it.
++ */
++#define BD_BDJ_DEFER_START 1
++
++/**
++ *  Enable or disable deferring a BD-J playlist player's start to its
++ *  presentation (default: disabled).
++ */
++BD_PUBLIC void     bd_bdj_set_defer_start(BLURAY *bd, int enable);
++
++/**
++ *  1 if a start is held for presentation; *start_seq is its marker's sequence
++ *  number (held items numbered from it on belong to the start).
++ */
++BD_PUBLIC int      bd_bdj_start_pending(BLURAY *bd, uint32_t *start_seq);
++
++#define BD_BDJ_RELEASE_ALL   0x1  /* release everything held (seq ignored) */
++#define BD_BDJ_RELEASE_FLUSH 0x2  /* a player flush: keep a held start's own items */
++
++/**
++ *  bd_bdj_release()/bd_bdj_release_all() with the start instant of a start
++ *  released here (CLOCK_MONOTONIC ns; 0 = now) and flags.
++ */
++BD_PUBLIC void     bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags);
++
+ /**
+  *
+  *  Set current playback rate.
+diff --git a/src/libbluray/bluray_internal.h b/src/libbluray/bluray_internal.h
+index b5b780c..9456cc0 100644
+--- a/src/libbluray/bluray_internal.h
++++ b/src/libbluray/bluray_internal.h
+@@ -74,6 +74,8 @@ BD_PRIVATE void     bdpriv_select_rate(struct bluray *bd, float rate, int reason
+ 
+ /* media time for BD-J: the presented position under presentation timing */
+ BD_PRIVATE uint64_t bdpriv_bdj_tell_time(struct bluray *bd);
++/* start at presentation: 0 start gen, 1 start title time, 2 presented gen, 3 presented start ns */
++BD_PRIVATE int64_t  bdpriv_bdj_presentation_info(struct bluray *bd, int which);
+ BD_PRIVATE int      bdpriv_seek(struct bluray *bd, int playitem, int playmark, int64_t time);
+ BD_PRIVATE int      bdpriv_sound_effect(struct bluray *bd, int id);
+ 

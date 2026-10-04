@@ -51,7 +51,7 @@ src/libbluray/bluray.c:bd->bdj_pt_playitem_valid = 1;:2
 src/libbluray/bluray.c:_write_time_psr(bd, clip, clip->in_time);:1
 src/libbluray/bluray.c:_write_time_psr(bd, bd->st0.clip, time);:1
 src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_tell_time(bd);:1
-src/libbluray/bluray.c:_bdj_pt_release(bd, :8
+src/libbluray/bluray.c:_bdj_pt_release(bd, :9
 src/libbluray/bluray.c:bd->bdj_pt_releasing = 1;:1
 src/libbluray/bluray.c:!bd->bdj_pt_chapter_valid && param != 0xffff) {:1
 src/libbluray/bluray.c:bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq + 1;:1
@@ -79,6 +79,18 @@ src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:if (!masked && state == NOT
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:maskedFrom = from;:2
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:ret = false;                /* stock: already loaded */:1
 src/libbluray/bdj/java/org/videolan/BDJAppProxy.java:mask initPresent() set while this command was already running) */:1
+# 17 BD-J playlist player starts at its presentation (replaces 16)
+src/libbluray/bluray.c:_bdj_pt_push(bd, 0, BDJ_EVENT_PRESENTATION_START, bd->bdj_start_gen, 0);:1
+src/libbluray/bluray.c:bd->bdj_presented_start_ns = bd->bdj_release_start_ns;:1
+src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags);:1
+src/libbluray/bdj/bdj.h:BDJ_EVENT_PRESENTATION_START = 19,:1
+src/libbluray/bdj/native/org_videolan_Libbluray.c:return bdpriv_bdj_presentation_info(bd, which);:1
+src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:private void resolvePendingStart(String how, boolean presented) {:1
+src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:player.onStatus(((Integer)param).intValue(), param2);:1
+src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java:deferredStartGen = Libbluray.presentationInfo(0);:1
+src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java:player.endPendingStart(:1
+src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:doClockShift:0
+
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
 src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1
@@ -121,11 +133,3 @@ src/libbluray/decoders/graphics_controller.c:int64_t pts = gc->render_pts;:1
 src/libbluray/decoders/graphics_controller.c:p->render_pts = -1;:1
 src/libbluray/decoders/graphics_controller.c:gc->render_pts = -1;:4
 src/libbluray/bluray.c:_run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);:2
-# libbluray-16: the player shifts the BD-J media clock over a held start
-src/libbluray/bdj/bdj.h:BDJ_EVENT_CLOCK_SHIFT      = 19,:1
-src/libbluray/bdj/bdj.c:/* 19 */ "CLOCK_SHIFT",:1
-src/libbluray/bluray.h:BD_PUBLIC void     bd_bdj_shift_media_clock(BLURAY *bd, uint32_t ticks);:1
-src/libbluray/bluray.c:bdj_process_event(bd->bdjava, BDJ_EVENT_CLOCK_SHIFT, ticks);:1
-src/libbluray/bdj/java/org/videolan/Libbluray.java:case BDJ_EVENT_CLOCK_SHIFT::1
-src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:player.doClockShift(param2 & 0xffffffffL);:1
-src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:baseTime += ticks * 100000L / 9L; /* 90 kHz -> ns */:1
