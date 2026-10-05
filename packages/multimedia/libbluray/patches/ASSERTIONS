@@ -91,6 +91,11 @@ src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java:deferred
 src/libbluray/bdj/java/org/videolan/media/content/playlist/Handler.java:player.endPendingStart(:1
 src/libbluray/bdj/java/org/videolan/media/content/BDHandler.java:doClockShift:0
 
+# 18 BD-J held marks carry their own presentation time
+src/libbluray/bluray.h:#define BD_BDJ_ENTRY_TIMES 1:1
+src/libbluray/bluray.c:bd->bdj_pt_queue[idx].pts45      = mark->clip_time;:1
+src/libbluray/bluray.c:entries[count].pts45      = bd->bdj_pt_queue[idx].pts45;:1
+
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
 src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1

@@ -1,0 +1,112 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: held marks carry their own presentation time
+
+A mark is reached when the reader passes the entry point at or before it
+(_fill_mark: title_pkt is the entry point; _playmark_reached), up to a GOP
+before the mark's picture. Under presentation timing (patch 13) the player
+releases a held batch when the picture reaches where it was read, so a mark
+reached the application up to a GOP early (measured: M3GAN 2.0 -998 ms,
+True Blood -783 ms, Superman -160..-205 ms).
+
+Each held mark now records its clip time and its clip's title byte range,
+and bd_bdj_entry_times() returns them, so the player can convert the mark's
+own time onto its clock and release it when its picture is presented.
+
+---
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 1d4dc17..1d18a6a 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -184,6 +184,10 @@ struct bluray {
+         uint32_t ev;
+         uint32_t param;
+         uint64_t title_time;
++        /* a mark's own presentation time (bd_bdj_entry_times()) */
++        uint8_t  timed;
++        uint32_t pts45;
++        uint64_t clip_start, clip_end;
+     } bdj_pt_queue[256];
+     /* A BD-J playlist player's start, presented (bd_bdj_set_defer_start()).
+      * The C start of a playlist player (bdpriv_select_rate(START)) opens a
+@@ -1763,6 +1767,17 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
+     bd->bdj_pt_queue[idx].ev         = ev;
+     bd->bdj_pt_queue[idx].param      = param;
+     bd->bdj_pt_queue[idx].title_time = title_time;
++    bd->bdj_pt_queue[idx].timed      = 0;
++    if (!is_time && ev == BDJ_EVENT_MARK && bd->title && param < bd->title->mark_list.count) {
++        const NAV_MARK *mark = &bd->title->mark_list.mark[param];
++        if (mark->clip_ref < bd->title->clip_list.count) {
++            const NAV_CLIP *clip = &bd->title->clip_list.clip[mark->clip_ref];
++            bd->bdj_pt_queue[idx].timed      = 1;
++            bd->bdj_pt_queue[idx].pts45      = mark->clip_time;
++            bd->bdj_pt_queue[idx].clip_start = (uint64_t)clip->title_pkt * 192;
++            bd->bdj_pt_queue[idx].clip_end   = ((uint64_t)clip->title_pkt + clip->end_pkt - clip->start_pkt) * 192;
++        }
++    }
+     bd->bdj_pt_count++;
+ }
+ 
+@@ -4385,6 +4400,29 @@ int bd_bdj_start_pending(BLURAY *bd, uint32_t *start_seq)
+     return pending;
+ }
+ 
++unsigned bd_bdj_entry_times(BLURAY *bd, uint32_t after_seq, uint32_t upto_seq,
++                            BD_BDJ_ENTRY_TIME *entries, unsigned n)
++{
++    const unsigned size = sizeof(bd->bdj_pt_queue) / sizeof(bd->bdj_pt_queue[0]);
++    unsigned i, count = 0;
++    bd_mutex_lock(&bd->mutex);
++    for (i = 0; i < bd->bdj_pt_count && count < n; i++) {
++        const unsigned idx = (bd->bdj_pt_head + i) % size;
++        const uint32_t seq = bd->bdj_pt_queue[idx].seq;
++        if (!bd->bdj_pt_queue[idx].timed ||
++            (int32_t)(seq - after_seq) <= 0 || (int32_t)(seq - upto_seq) > 0) {
++            continue;
++        }
++        entries[count].seq        = seq;
++        entries[count].pts45      = bd->bdj_pt_queue[idx].pts45;
++        entries[count].clip_start = bd->bdj_pt_queue[idx].clip_start;
++        entries[count].clip_end   = bd->bdj_pt_queue[idx].clip_end;
++        count++;
++    }
++    bd_mutex_unlock(&bd->mutex);
++    return count;
++}
++
+ void bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags)
+ {
+     bd_mutex_lock(&bd->mutex);
+diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+index 4132186..b9988fb 100644
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1215,6 +1215,29 @@ BD_PUBLIC int      bd_bdj_start_pending(BLURAY *bd, uint32_t *start_seq);
+  */
+ BD_PUBLIC void     bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags);
+ 
++/*
++ * The presentation time of held marks (requires presentation timing).
++ *
++ * A mark is reached when the reader passes the entry point at or before it,
++ * up to a GOP before its picture. Each held mark carries its own time, so the
++ * player can release it when its picture is presented.
++ */
++#define BD_BDJ_ENTRY_TIMES 1
++
++typedef struct {
++    uint32_t seq;        /* held item sequence number */
++    uint32_t pts45;      /* presentation time in its clip, 45 kHz */
++    uint64_t clip_start; /* the clip's title byte range: [clip_start, clip_end) */
++    uint64_t clip_end;
++} BD_BDJ_ENTRY_TIME;
++
++/**
++ *  The held marks numbered in (after_seq, upto_seq], oldest first.
++ *  Returns how many were written to entries (at most n).
++ */
++BD_PUBLIC unsigned bd_bdj_entry_times(BLURAY *bd, uint32_t after_seq, uint32_t upto_seq,
++                                      BD_BDJ_ENTRY_TIME *entries, unsigned n);
++
+ /**
+  *
+  *  Set current playback rate.

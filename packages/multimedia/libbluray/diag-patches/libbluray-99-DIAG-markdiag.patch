@@ -1,0 +1,89 @@
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 1d18a6a..c1868aa 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -188,7 +188,10 @@ struct bluray {
+         uint8_t  timed;
+         uint32_t pts45;
+         uint64_t clip_start, clip_end;
++        uint32_t diag_clip_time; /* DIAG: presentation clip time (45 kHz), 0 = unknown */
++        uint64_t diag_read_s_pos;
+     } bdj_pt_queue[256];
++    int64_t         diag_pres_us; /* DIAG: player's presented time, demux domain (us) */
+     /* A BD-J playlist player's start, presented (bd_bdj_set_defer_start()).
+      * The C start of a playlist player (bdpriv_select_rate(START)) opens a
+      * start generation and queues a marker; the application's StartEvent and
+@@ -1670,6 +1673,11 @@ static int _bdj_pt_active(BLURAY *bd)
+ 
+ static void _bdj_pt_deliver(BLURAY *bd, unsigned idx)
+ {
++    BD_DEBUG(DBG_BLURAY | DBG_CRIT, "MARKDIAG deliver seq %u %s %u param %u clip45 %u pres_us %" PRId64 " read_pos %" PRIu64 " s_pos %" PRIu64 "\n",
++             bd->bdj_pt_queue[idx].seq, bd->bdj_pt_queue[idx].is_time ? "psr8" : "ev",
++             bd->bdj_pt_queue[idx].ev, bd->bdj_pt_queue[idx].param,
++             bd->bdj_pt_queue[idx].diag_clip_time, bd->diag_pres_us,
++             bd->bdj_pt_queue[idx].diag_read_s_pos, bd->s_pos);
+     bd->bdj_pt_releasing = 1;
+     if (bd->bdj_pt_queue[idx].is_time) {
+         bd->bdj_pt_presented_time  = bd->bdj_pt_queue[idx].title_time;
+@@ -1732,6 +1740,8 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
+             bd->bdj_pt_queue[idx].seq        = ++bd->bdj_pt_seq;
+             bd->bdj_pt_queue[idx].param      = param;
+             bd->bdj_pt_queue[idx].title_time = title_time;
++            bd->bdj_pt_queue[idx].diag_clip_time = param;
++            bd->bdj_pt_queue[idx].diag_read_s_pos = bd->s_pos;
+             return;
+         }
+     }
+@@ -1768,6 +1778,15 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
+     bd->bdj_pt_queue[idx].param      = param;
+     bd->bdj_pt_queue[idx].title_time = title_time;
+     bd->bdj_pt_queue[idx].timed      = 0;
++    bd->bdj_pt_queue[idx].diag_clip_time = 0;
++    bd->bdj_pt_queue[idx].diag_read_s_pos = bd->s_pos;
++    if (is_time) {
++        bd->bdj_pt_queue[idx].diag_clip_time = param;
++    } else if (bd->title && ev == BDJ_EVENT_MARK && param < bd->title->mark_list.count) {
++        bd->bdj_pt_queue[idx].diag_clip_time = bd->title->mark_list.mark[param].clip_time;
++    } else if (bd->title && ev == BDJ_EVENT_PLAYITEM && param < bd->title->clip_list.count) {
++        bd->bdj_pt_queue[idx].diag_clip_time = bd->title->clip_list.clip[param].in_time;
++    }
+     if (!is_time && ev == BDJ_EVENT_MARK && bd->title && param < bd->title->mark_list.count) {
+         const NAV_MARK *mark = &bd->title->mark_list.mark[param];
+         if (mark->clip_ref < bd->title->clip_list.count) {
+@@ -2016,7 +2035,8 @@ static void _playmark_reached(BLURAY *bd)
+ {
+     while (bd->next_mark >= 0 && bd->s_pos > bd->next_mark_pos) {
+ 
+-        BD_DEBUG(DBG_BLURAY, "PlayMark %d reached (%" PRIu64 ")\n", bd->next_mark, bd->next_mark_pos);
++        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "MARKDIAG mark %d reached clip45 %u mark_pos %" PRIu64 " s_pos %" PRIu64 "\n", bd->next_mark,
++                 bd->title->mark_list.mark[bd->next_mark].clip_time, bd->next_mark_pos, bd->s_pos);
+ 
+         _queue_event(bd, BD_EVENT_PLAYMARK, bd->next_mark);
+         _bdj_event(bd, BDJ_EVENT_MARK, bd->next_mark);
+@@ -4423,6 +4443,13 @@ unsigned bd_bdj_entry_times(BLURAY *bd, uint32_t after_seq, uint32_t upto_seq,
+     return count;
+ }
+ 
++void bd_bdj_diag_presented(BLURAY *bd, int64_t demux_us)
++{
++    bd_mutex_lock(&bd->mutex);
++    bd->diag_pres_us = demux_us;
++    bd_mutex_unlock(&bd->mutex);
++}
++
+ void bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags)
+ {
+     bd_mutex_lock(&bd->mutex);
+diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+index b9988fb..9f1d9bb 100644
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1214,6 +1214,8 @@ BD_PUBLIC int      bd_bdj_start_pending(BLURAY *bd, uint32_t *start_seq);
+  *  released here (CLOCK_MONOTONIC ns; 0 = now) and flags.
+  */
+ BD_PUBLIC void     bd_bdj_release_ex(BLURAY *bd, uint32_t seq, int64_t start_ns, int flags);
++/* DIAG (MARKDIAG): the player's presented time, demux domain, microseconds */
++BD_PUBLIC void     bd_bdj_diag_presented(BLURAY *bd, int64_t demux_us);
+ 
+ /*
+  * The presentation time of held marks (requires presentation timing).
