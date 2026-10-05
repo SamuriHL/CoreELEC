@@ -1,0 +1,73 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] BD-J: a playitem the reader enters carries its presentation time
+
+The reader posts PLAYITEM when it opens the next clip of the playlist, one
+read-ahead before that clip's first picture. Under presentation timing
+(patch 13) it then reached the application when the picture got to where it
+was read: John Wick 3's menu, playitem 1, -167 ms.
+
+A PLAYITEM posted while the reader opens the next clip now records that
+clip's IN time and title byte range, as a mark does (patch 18), so the
+player converts it onto its clock at the clip's first picture. A PLAYITEM
+posted at a playlist's open, by a seek or by an angle change is left as it
+was: the start and the seek already place those.
+
+---
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 1d18a6a..56ffe5d 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -202,6 +202,9 @@ struct bluray {
+     uint32_t        bdj_presented_gen;
+     int64_t         bdj_presented_start_ns; /* CLOCK_MONOTONIC ns of the first picture, 0 = at delivery */
+     int64_t         bdj_release_start_ns;   /* start instant passed with the current release */
++    /* the reader is opening the next clip of the playlist it plays: the
++     * PLAYITEM this posts is at that clip's first picture */
++    uint8_t         bdj_pt_reader_clip;
+     uint8_t         uo_restriction_level; /* 0 to ignore UO restrictions */
+ 
+     /* HDMV */
+@@ -1778,6 +1781,17 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
+             bd->bdj_pt_queue[idx].clip_end   = ((uint64_t)clip->title_pkt + clip->end_pkt - clip->start_pkt) * 192;
+         }
+     }
++    /* a playitem the reader enters: at its clip's IN time. Not one posted at a
++     * playlist's open, a seek or an angle change (the start and the seek
++     * already place those) */
++    if (!is_time && ev == BDJ_EVENT_PLAYITEM && bd->bdj_pt_reader_clip && bd->title &&
++        bd->st0.clip && param == bd->st0.clip->ref && param < bd->title->clip_list.count) {
++        const NAV_CLIP *clip = bd->st0.clip;
++        bd->bdj_pt_queue[idx].timed      = 1;
++        bd->bdj_pt_queue[idx].pts45      = clip->in_time;
++        bd->bdj_pt_queue[idx].clip_start = (uint64_t)clip->title_pkt * 192;
++        bd->bdj_pt_queue[idx].clip_end   = ((uint64_t)clip->title_pkt + clip->end_pkt - clip->start_pkt) * 192;
++    }
+     bd->bdj_pt_count++;
+ }
+ 
+@@ -2400,9 +2414,12 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+                 if (clip_pkt >= bd->angle_change_pkt) {
+                     if (clip_pkt >= st->clip->end_pkt) {
+                         st->clip = nav_next_clip(bd->title, st->clip);
++                        bd->bdj_pt_reader_clip = 1;
+                         if (!_open_m2ts(bd, st)) {
++                            bd->bdj_pt_reader_clip = 0;
+                             return -1;
+                         }
++                        bd->bdj_pt_reader_clip = 0;
+                         bd->s_pos = (uint64_t)st->clip->title_pkt * 192L;
+                     } else {
+                         _change_angle(bd);
+@@ -2448,9 +2465,12 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+                         bd->end_of_playlist |= 1;
+                         return 0;
+                     }
++                    bd->bdj_pt_reader_clip = 1;
+                     if (!_open_m2ts(bd, st)) {
++                        bd->bdj_pt_reader_clip = 0;
+                         return -1;
+                     }
++                    bd->bdj_pt_reader_clip = 0;
+ 
+                     if (st->clip->connection == CONNECT_NON_SEAMLESS) {
+                         /* application layer demuxer buffers must be reset here */
