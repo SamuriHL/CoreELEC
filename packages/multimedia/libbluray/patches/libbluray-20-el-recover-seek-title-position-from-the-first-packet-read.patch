@@ -1,0 +1,130 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: [PATCH] seek: the title position is the first packet read
+
+The DV EL recovery (patch 04) starts a seek's read up to 4096 packets
+before the target, but the title position was set to the target's, so
+every byte read after a seek ran ahead of the title layout by the rewind:
+786432 bytes after a seek deep into a clip, 576 after one near its start.
+Positions compared across seeks (a player's seam marks) were off by the
+difference: after an FF return into M3GAN's playitem 2 the seam's step
+missed the clip's first frames, a start took one of them as its clock,
+and the picture ran 1.5 ms off the sound.
+
+After a seek the title position is now that of the first packet read
+(within the playitem, as natural playback counts its own rewind). The
+next playmark and the chapter are still found at the target, so none at
+or before it fires during the recovery read, and the time and chapter
+reported stay the target's until the read passes it (a BD-J playlist
+start takes its start time there). PSR_TIME and the seek event carry the
+target's time rather than the rewound packet's, which at a clip start
+has none.
+
+---
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -124,6 +124,7 @@
+     NAV_TITLE      *title;
+     uint32_t       title_idx;
+     uint64_t       s_pos;
++    uint64_t       s_pos_seek;  /* a seek's target while its EL recovery read runs */
+ 
+     /* streams */
+     BD_STREAM      st0;       /* main path */
+@@ -2054,6 +2055,13 @@
+  * seeking and current position
+  */
+ 
++/* the title position presented: the time and the chapter are the seek
++ * target's until the EL recovery read before it has passed it */
++static uint64_t _s_pos_presented(BLURAY *bd)
++{
++    return bd->s_pos < bd->s_pos_seek ? bd->s_pos_seek : bd->s_pos;
++}
++
+ static int64_t _seek_internal(BLURAY *bd,
+                            const NAV_CLIP *clip, uint32_t title_pkt, uint32_t clip_pkt)
+ {
+@@ -2066,8 +2074,19 @@
+         /* update title position */
+         bd->s_pos = (uint64_t)title_pkt * 192;
+ 
+-        /* Update PSR_TIME */
+-        media_time = _update_time_psr_from_stream(bd);
++        /* Update PSR_TIME: at the target, not the packet the EL recovery
++         * (patch 04) reads from, which at a clip start has no time */
++        media_time = 0;
++        if (bd->title) {
++            uint32_t found_pkt, clip_time;
++            nav_clip_packet_search(clip, clip_pkt, &found_pkt, &clip_time);
++            if (clip_time >= clip->in_time && clip_time <= clip->out_time) {
++                _update_time_psr(bd, clip_time);
++                media_time = clip_time;
++            } else {
++                media_time = _update_time_psr_from_stream(bd);
++            }
++        }
+ 
+         /* emit notification events */
+         if (media_time >= clip->in_time) {
+@@ -2087,7 +2106,25 @@
+         }
+ 
+         BD_DEBUG(DBG_BLURAY, "Seek to %" PRIu64 "\n", bd->s_pos);
+-        return bd->s_pos;
++        result = (int64_t)bd->s_pos;
++
++        /* The EL recovery reads from up to EL_RECOVER_MAX_PKTS before the
++         * target (within this playitem, as natural playback does), and every
++         * byte read counts on from the first: the title position is that
++         * packet's. Taken as the target's, every later byte ran ahead of the
++         * title layout by the rewind, a different amount after each seek.
++         * Marks and the chapter are found at the target first, so none at or
++         * before it fires during the recovery read. */
++        {
++            const uint32_t read_pkt = SPN(bd->st0.clip_pos);
++            uint32_t back = clip_pkt > read_pkt ? clip_pkt - read_pkt : 0;
++            const uint32_t in_item = clip_pkt >= clip->start_pkt ? clip_pkt - clip->start_pkt : 0;
++            if (back > in_item)
++                back = in_item;
++            bd->s_pos_seek = back ? bd->s_pos : 0;
++            bd->s_pos -= (uint64_t)back * 192;
++        }
++        return result;
+     }
+ 
+     return result;
+@@ -2172,7 +2209,7 @@
+     bd_mutex_lock(&bd->mutex);
+ 
+     if (bd->title) {
+-        clip = nav_packet_search(bd->title, SPN(bd->s_pos), &clip_pkt, &out_pkt, &out_time);
++        clip = nav_packet_search(bd->title, SPN(_s_pos_presented(bd)), &clip_pkt, &out_pkt, &out_time);
+         if (clip) {
+             out_time += clip->title_time;
+         }
+@@ -2250,7 +2287,7 @@
+     bd_mutex_lock(&bd->mutex);
+ 
+     if (bd->title) {
+-        ret = nav_chapter_get_current(bd->title, SPN(bd->s_pos));
++        ret = nav_chapter_get_current(bd->title, SPN(_s_pos_presented(bd)));
+     }
+ 
+     bd_mutex_unlock(&bd->mutex);
+@@ -2421,6 +2458,7 @@
+                         }
+                         bd->bdj_pt_reader_clip = 0;
+                         bd->s_pos = (uint64_t)st->clip->title_pkt * 192L;
++                        bd->s_pos_seek = 0;
+                     } else {
+                         _change_angle(bd);
+                         _clip_seek_time(bd, bd->angle_change_time);
+@@ -2897,6 +2935,7 @@
+ 
+     bd->seamless_angle_change = 0;
+     bd->s_pos = 0;
++    bd->s_pos_seek = 0;
+     bd->end_of_playlist = 0;
+     bd->st0.ig_pid = 0;
+ 

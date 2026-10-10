@@ -142,3 +142,8 @@ src/libbluray/decoders/graphics_controller.c:int64_t pts = gc->render_pts;:1
 src/libbluray/decoders/graphics_controller.c:p->render_pts = -1;:1
 src/libbluray/decoders/graphics_controller.c:gc->render_pts = -1;:4
 src/libbluray/bluray.c:_run_gc(bd, GC_CTRL_INIT_MENU, bd->st_ig.clip != NULL);:2
+# 20 seek: title position from the first packet read (EL recovery rewind)
+src/libbluray/bluray.c:bd->s_pos -= (uint64_t)back * 192;:1
+src/libbluray/bluray.c:nav_clip_packet_search(clip, clip_pkt, &found_pkt, &clip_time);:1
+src/libbluray/bluray.c:bd->s_pos_seek = back ? bd->s_pos : 0;:1
+src/libbluray/bluray.c:SPN(_s_pos_presented(bd)):2
