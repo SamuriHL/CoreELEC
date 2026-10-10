@@ -19,3 +19,7 @@ drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp)
 # 0003: at EOS either layer of a dual-layer pair flushes the other
 drivers/frame_provider/decoder/h265/vh265.c:pr_info("vh265: end of stream in the %s layer: flushed the %s layer\n",:1
 drivers/frame_provider/decoder/h265/vh265.c:vdec->slave ? vdec->slave : vdec->master;:1
+# 0004: the dual-layer fast output hands a picture out once (no endless loop)
+drivers/frame_provider/decoder/h265/vh265.c:pic_display->fast_output_done = 1;:1
+drivers/frame_provider/decoder/h265/vh265.c:new_pic->fast_output_done = 0;:1
+drivers/frame_provider/decoder/h265/vh265.c:pic_display = fast_pic = pic;:1
