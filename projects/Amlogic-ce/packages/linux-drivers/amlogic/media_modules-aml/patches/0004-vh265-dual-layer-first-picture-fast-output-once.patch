@@ -1,0 +1,75 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Sat, 10 Oct 2026 00:20:00 -0400
+Subject: [PATCH] vh265: dual-layer first-picture fast output once per picture
+
+output_pic_display() calls output_pic() until it returns NULL. Before a
+decoder's first output (vf_pre_count == 0) output_pic() hands out any I
+picture, marked or not, when the decoder is half of a Dolby Vision pair
+(the force_output path shows the first picture this way before the next
+header marks it). When that picture is then not displayed (error_mark,
+nodisp_mark or drop_flag, as for the pictures before a seek target)
+vf_pre_count stays 0 and output_pic() hands out the same picture again:
+the decoder IRQ thread spins in output_pic_display() for good, no more
+pictures come, and the player's close blocks in vdec_free_irq()
+(synchronize_irq), so neither stop nor reboot completes. Seen on G12B
+and S6 after FF returns on a FEL disc (M3GAN), about one in 80.
+
+Hand a picture out through the fast path once; get_new_pic() clears the
+flag when the buffer takes a new picture. Every other picture returned
+has its output_mark cleared, so the loop ends.
+
+---
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -1434,6 +1434,7 @@
+ 	unsigned char recon_mark;
+ 	unsigned char output_ready;
+ 	unsigned char nodisp_mark;
++	unsigned char fast_output_done;
+ 	unsigned char error_mark;
+ 	unsigned char dis_mark;
+ 	int slice_idx;
+@@ -4463,6 +4464,7 @@
+ 	int i, first_pic_flag = 0;
+ 	struct PIC_s *pic;
+ 	struct PIC_s *pic_display = NULL;
++	struct PIC_s *fast_pic = NULL;
+ 	struct vdec_s *vdec = hw_to_vdec(hevc);
+ 
+ 	if (hevc->i_only & 0x4) {
+@@ -4506,8 +4508,16 @@
+ 				fast_output_enable & 0x1) {
+ 				/*fast output for first I picture*/
+ 				pic->num_reorder_pic = 0;
+-				if (vdec->master || vdec->slave)
+-					pic_display = pic;
++				/* once per picture: one not displayed (dropped
++				 * after a seek) leaves vf_pre_count at 0 and would
++				 * come back here forever in output_pic_display() */
++				if ((vdec->master || vdec->slave) &&
++					pic->fast_output_done)
++					hevc_print(hevc, 0,
++						"VH265: first frame poc %d already handed out\n",
++						pic->POC);
++				else if (vdec->master || vdec->slave)
++					pic_display = fast_pic = pic;
+ 				first_pic_flag = 1;
+ 				hevc->first_output_poc = pic->POC;
+ 				hevc_print(hevc, 0, "VH265: output first frame poc %d \n",hevc->first_output_poc);
+@@ -4579,6 +4589,8 @@
+ 		else
+ 			hevc->first_pic_flag = 3;
+ 	}
++	if (pic_display && pic_display == fast_pic)
++		pic_display->fast_output_done = 1;
+ 	return pic_display;
+ }
+ 
+@@ -6682,6 +6694,7 @@
+ 		new_pic->error_mark = 0;
+ 		new_pic->dis_mark = 0;
+ 		new_pic->nodisp_mark = 0;
++		new_pic->fast_output_done = 0;
+ 		new_pic->sei_present_flag = 0;
+ 		/* new_pic->output_ready = 0; */
+ 		new_pic->num_reorder_pic = rpm_param->p.sps_num_reorder_pics_0;

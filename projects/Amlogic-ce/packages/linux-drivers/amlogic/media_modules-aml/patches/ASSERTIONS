@@ -16,3 +16,7 @@ drivers/frame_provider/decoder/utils/vdec.c:decodes against the wp of the master
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(VLD_MEM_VIFIFO_WP,:3
 drivers/frame_provider/decoder/utils/vdec.c:				WRITE_VREG(HEVC_STREAM_WR_PTR,:3
 drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp));:6
+# 0004: the dual-layer fast output hands a picture out once (no endless loop)
+drivers/frame_provider/decoder/h265/vh265.c:pic_display->fast_output_done = 1;:1
+drivers/frame_provider/decoder/h265/vh265.c:new_pic->fast_output_done = 0;:1
+drivers/frame_provider/decoder/h265/vh265.c:pic_display = fast_pic = pic;:1
