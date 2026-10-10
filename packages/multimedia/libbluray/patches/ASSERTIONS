@@ -147,3 +147,7 @@ src/libbluray/bluray.c:bd->s_pos -= (uint64_t)back * 192;:1
 src/libbluray/bluray.c:nav_clip_packet_search(clip, clip_pkt, &found_pkt, &clip_time);:1
 src/libbluray/bluray.c:bd->s_pos_seek = back ? bd->s_pos : 0;:1
 src/libbluray/bluray.c:SPN(_s_pos_presented(bd)):2
+# 21 clip switch: title position from the clip layout (EL recovery rewind at a non-seamless entry)
+src/libbluray/bluray.c:static void _s_pos_at_clip_start(BLURAY *bd, BD_STREAM *st):1
+src/libbluray/bluray.c:_s_pos_at_clip_start(bd, st);:2
+src/libbluray/bluray.c:bd->s_pos_seek = back ? (uint64_t)st->clip->title_pkt * 192 : 0;:1

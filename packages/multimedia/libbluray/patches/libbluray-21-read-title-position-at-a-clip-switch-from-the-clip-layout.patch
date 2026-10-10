@@ -1,0 +1,60 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Sat, 10 Oct 2026 08:00:00 -0400
+Subject: [PATCH] read: title position at a clip switch from the clip layout
+
+The reader's normal clip switch kept counting the title position from
+the bytes read. A non-seamless playitem entry into a clip with a Dolby
+Vision enhancement layer starts the read up to 4096 packets before the
+clip's start (patch 04's EL recovery), so from then on the title
+position ran ahead of the clip layout (title_pkt) by those packets
+until the title ended: bd_tell(), bd_tell_time() and the chapter
+lookup, and any seamless seam later in the playlist. Seamless clips
+start at packet 0 and read no extra packets.
+
+At a clip switch, the reader's and the seamless angle change's, set the
+title position from the clip layout less the packets read before the
+clip's start, as patch 20 does after a seek; time and chapter present
+the clip's start while those packets are read.
+---
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -2436,6 +2436,21 @@
+     return bd->s_pos;
+ }
+ 
++/* The title position at the start of the clip the reader just opened: the
++ * clip layout, less a DV EL recovery rewind (a non-seamless entry), whose
++ * packets come before the clip's start and sit below it. Time and chapter
++ * present the clip's start while they are read. */
++static void _s_pos_at_clip_start(BLURAY *bd, BD_STREAM *st)
++{
++    const uint32_t read_pkt = SPN(st->clip_pos);
++    uint32_t back = st->clip->start_pkt > read_pkt ? st->clip->start_pkt - read_pkt : 0;
++    if (back > st->clip->title_pkt) {
++        back = st->clip->title_pkt;
++    }
++    bd->s_pos = ((uint64_t)st->clip->title_pkt - back) * 192;
++    bd->s_pos_seek = back ? (uint64_t)st->clip->title_pkt * 192 : 0;
++}
++
+ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+ {
+     BD_STREAM *st = &bd->st0;
+@@ -2457,8 +2472,7 @@
+                             return -1;
+                         }
+                         bd->bdj_pt_reader_clip = 0;
+-                        bd->s_pos = (uint64_t)st->clip->title_pkt * 192L;
+-                        bd->s_pos_seek = 0;
++                        _s_pos_at_clip_start(bd, st);
+                     } else {
+                         _change_angle(bd);
+                         _clip_seek_time(bd, bd->angle_change_time);
+@@ -2509,6 +2523,7 @@
+                         return -1;
+                     }
+                     bd->bdj_pt_reader_clip = 0;
++                    _s_pos_at_clip_start(bd, st);
+ 
+                     if (st->clip->connection == CONNECT_NON_SEAMLESS) {
+                         /* application layer demuxer buffers must be reset here */
