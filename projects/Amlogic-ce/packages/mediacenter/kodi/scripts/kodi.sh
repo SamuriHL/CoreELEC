@@ -58,7 +58,7 @@ single_stacktrace()
 detect_crash_loop()
 {
   # use monotonic time (in case date/time changes after booting)
-  NOW_TIME=$(awk '/^now/ {print int(${3} / 1000000000)}' /proc/timer_list)
+  NOW_TIME=$(awk '/^now/ {print int($3 / 1000000000)}' /proc/timer_list)
   echo "${NOW_TIME}" >> ${CRASH_HIST}
 
   NUM_RESTARTS=$(wc -l ${CRASH_HIST} | cut -d' ' -f1)
