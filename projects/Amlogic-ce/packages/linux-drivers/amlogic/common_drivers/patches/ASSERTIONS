@@ -163,3 +163,4 @@ sound/soc/amlogic/auge/tdm.c:aml_pll_trim_release(p_tdm);:1
 sound/soc/amlogic/auge/sharebuffer.c:aml_pll_trim_owner(NULL, NULL);:1
 sound/soc/amlogic/auge/card.c:snd_soc_add_card_controls(&priv->snd_card, &aml_pll_trim_control, 1);:1
 sound/soc/amlogic/Makefile:auge/audio_pll_trim.o:1
+drivers/drm/meson_hdmi.c:(get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE) ||:1
