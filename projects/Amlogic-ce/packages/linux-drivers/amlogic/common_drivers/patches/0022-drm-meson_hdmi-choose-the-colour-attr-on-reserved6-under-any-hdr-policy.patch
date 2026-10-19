@@ -1,0 +1,37 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Mon, 19 Oct 2026 06:00:00 -0400
+Subject: [PATCH] drm/meson_hdmi: choose the colour attr on RESERVED6 under any HDR policy
+
+atomic_check lets the driver choose the colour format and depth only in
+recovery mode, under hdr_policy 1 (follow source) or a forced DV policy.
+Under hdr_policy 0 (follow sink, which Kodi sets for SDR->HDR) the attr
+in the connector state is carried into every mode set, so the 8-bit
+YUV444/RGB a Dolby Vision tunnel needs outlives the DV session: the
+desktop and the next HDR10 film go out SDR on an 8-bit link until a
+reboot (hdmitx sends no HDR packet at 24-bit depth).
+
+Kodi already asks for a fresh choice when it leaves the DV link, by
+writing color_space = HDMI_COLORSPACE_RESERVED6; under follow-sink that
+request reached validation as "rgb" with the old depth. Treat RESERVED6
+as the explicit request it is, under any policy. Nothing else writes it,
+and the other policies already choose here, so they are unchanged.
+
+---
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -2164,8 +2164,14 @@
+ 	}
+ 
+ 	/*The recovery mode not have composer to set attr*/
++	/*
++	 * RESERVED6 is userspace asking the driver to choose: honour it under
++	 * any HDR policy, or a follow-sink policy carries the previous attr
++	 * (a Dolby Vision tunnel's 8-bit) into every later mode set.
++	 */
+ 	if ((!meson_crtc_state->uboot_mode_init && am_hdmi_info.recovery_mode) ||
+-	    (get_hdr_policy() == 1) || (get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE))
++	    (get_hdr_policy() == 1) || (get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE) ||
++	    attr->colorformat == HDMI_COLORSPACE_RESERVED6)
+ 		meson_hdmitx_decide_color_attr(common, meson_crtc_state,
+ 						 attr, sequence_id);
+ 

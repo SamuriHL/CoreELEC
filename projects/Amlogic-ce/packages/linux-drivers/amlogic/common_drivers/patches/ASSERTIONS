@@ -138,3 +138,6 @@ drivers/media/enhancement/amdolby_vision/amdv.c:pr_dv_dbg("graphic follow video 
 
 # --- 0018: vout device checked before the sink min/max read (upstream 4dbe1c27) ---
 drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinfo->vout_device->dv_info &&:2
+
+# --- 0022: colour attr chosen on RESERVED6 under any HDR policy ---
+drivers/drm/meson_hdmi.c:(get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE) ||:1
