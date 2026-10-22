@@ -1,0 +1,272 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 22 Oct 2026 12:00:00 -0400
+Subject: [PATCH] drm/meson_hdmi: let userspace own the link after a hotplug
+
+At an HPD rise the hotplug callback restores the atomic state its
+plug-out saved (drm_mode_config_helper_resume), before userspace is
+told. A player that then sets its own mode brings the link up twice,
+and any mode other than the pre-unplug one lands after the TV may have
+locked onto the old one: a second re-lock nothing in userspace can
+prevent.
+
+Add aml_drm.hpd_restore (bool, 0644, default Y = today). With N the
+plug-in drops the saved state instead of committing it and does the
+rest of the resume helper (fbdev un-suspend, poll enable), so the link
+stays dark until userspace commits once. The device's suspend_state is
+cleared, not the by-value snapshot of drm_mode_config the callback took
+(an unlocked copy of the whole struct onto the stack; removed). A
+master_drop hook sets the parameter back to Y, so a crashed or killed
+player never leaves N behind.
+
+fake_plug fires the callback with no repeat check, so a repeated
+plug-out overwrote, and leaked, the state the first one saved. Put it
+once the new suspend has stored its own (Y and N alike).
+
+Userspace also cannot tell from a bare uevent which HPD state the
+callback acted on: the HPD state runs ahead of the callback. Publish it
+as read-only aml_drm.hpd_cb_state with aml_drm.hpd_cb_seq, a seqcount
+(odd while written, +2 per callback, even at rest), written on every
+call just before the uevent, outside CONFIG_CEC_NOTIFIER, under one
+spinlock. Whether a callback runs at boot depends on the SoC's probe
+order (the probe's own fire may come before or after the DRM bind
+registers it), so the bind seeds hpd_cb_state, under the same lock and
+only while the seq is still 0.
+
+The callback is fired unlocked from the hpd workqueue, the probe, PM
+resume and the fake_plug store; two concurrent calls could resume or
+put the same saved state twice. Serialise the callback body with a
+mutex.
+
+---
+diff --git a/drivers/drm/meson_drv.c b/drivers/drm/meson_drv.c
+index 3a38c67..5e9d4d1 100644
+--- a/drivers/drm/meson_drv.c
++++ b/drivers/drm/meson_drv.c
+@@ -165,6 +165,15 @@ static const struct drm_ioctl_desc meson_ioctls[] = {
+ 
+ DEFINE_DRM_GEM_FOPS(meson_drm_fops);
+ 
++/* a crashed or killed master never leaves hpd_restore=N behind */
++static void am_meson_drm_master_drop(struct drm_device *dev,
++				     struct drm_file *file_priv)
++{
++#ifndef CONFIG_AMLOGIC_DRM_CUT_HDMI
++	meson_hdmitx_master_drop();
++#endif
++}
++
+ static struct drm_driver meson_driver = {
+ 	/*driver_features setting move to probe functions*/
+ 	.driver_features	= 0,
+@@ -208,6 +217,7 @@ static struct drm_driver meson_driver = {
+ 
+ 	/* Misc */
+ 	.fops			= &meson_drm_fops,
++	.master_drop		= am_meson_drm_master_drop,
+ 	.name			= DRIVER_NAME,
+ 	.desc			= DRIVER_DESC,
+ 	.date			= "20220603",
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+index ce97bef..392346b 100644
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -12,6 +12,7 @@
+ #include <drm/drm_connector.h>
+ #include <drm/drm_hdcp.h>
+ #include <drm/drm_modeset_lock.h>
++#include <drm/drm_fb_helper.h>
+ 
+ #include <linux/component.h>
+ #include <linux/irq.h>
+@@ -26,6 +27,9 @@
+ #include <linux/amlogic/media/amdolbyvision/dolby_vision.h>
+ #include <linux/amlogic/media/amvecm/amvecm.h>
+ #include <linux/miscdevice.h>
++#include <linux/moduleparam.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
+ 
+ #ifdef CONFIG_DEBUG_FS
+ #include <linux/debugfs.h>
+@@ -51,6 +55,40 @@ char attr_debugfs[16];
+ /*for hw limitation, limit to 1080p/720p for recovery ui.*/
+ static bool hdmitx_set_smaller_pref = true;
+ 
++/*
++ * hpd_restore: Y (default) restores the pre-unplug atomic state at the HPD
++ * rise, as the driver always has. N drops that saved state instead, so the
++ * link stays dark until userspace commits its own mode. Reset to Y whenever
++ * the DRM master drops, so a crashed player never leaves N behind.
++ */
++static bool hpd_restore = true;
++module_param(hpd_restore, bool, 0644);
++MODULE_PARM_DESC(hpd_restore,
++		 "Y: HPD rise restores the pre-unplug state; N: link stays dark until userspace commits (reset to Y on DRM master drop)");
++
++/*
++ * hpd_cb_state/hpd_cb_seq: the HPD state the last hotplug callback acted on,
++ * published before that callback's uevent. hpd_cb_seq is a seqcount: odd
++ * while the callback writes, +2 per callback, even at rest, 0 when no
++ * callback has run since boot (the bind then seeds hpd_cb_state). Readers:
++ * read seq, state, seq; retry if a seq is odd or the two differ.
++ */
++static int hpd_cb_state;
++module_param(hpd_cb_state, int, 0444);
++MODULE_PARM_DESC(hpd_cb_state, "HPD state the last hotplug callback acted on");
++static unsigned int hpd_cb_seq;
++module_param(hpd_cb_seq, uint, 0444);
++MODULE_PARM_DESC(hpd_cb_seq,
++		 "seqcount: odd while the hotplug callback writes, +2 per callback, even at rest; 0 = no callback since boot");
++/* serialises every write of hpd_cb_state/hpd_cb_seq (callback and bind) */
++static DEFINE_SPINLOCK(hpd_cb_lock);
++/*
++ * serialises the hotplug callback body: it is fired unlocked from the hpd
++ * workqueue, the probe, PM resume and the fake_plug sysfs store, and two
++ * concurrent calls would resume or put the same suspend_state twice
++ */
++static DEFINE_MUTEX(hpd_cb_mutex);
++
+ /*TODO:will remove later.*/
+ static struct drm_display_mode dummy_mode = {
+ 	.name = "dummy_l",
+@@ -2563,6 +2601,18 @@ static void meson_hdmitx_init_dc_cap_property(struct drm_device *drm_dev,
+ 	}
+ }
+ 
++/* seqcount write of the pair: odd, state, even; under hpd_cb_lock */
++static void meson_hdmitx_hpd_cb_publish(int state)
++{
++	spin_lock(&hpd_cb_lock);
++	WRITE_ONCE(hpd_cb_seq, hpd_cb_seq + 1);
++	smp_wmb();
++	WRITE_ONCE(hpd_cb_state, state);
++	smp_wmb();
++	WRITE_ONCE(hpd_cb_seq, hpd_cb_seq + 1);
++	spin_unlock(&hpd_cb_lock);
++}
++
+ static void meson_hdmitx_hpd_cb(void *data)
+ {
+ 	struct am_hdmi_tx *am_hdmi = (struct am_hdmi_tx *)data;
+@@ -2572,12 +2622,15 @@ static void meson_hdmitx_hpd_cb(void *data)
+ 		&connector->dev->mode_config.connection_mutex;
+ #ifdef CONFIG_CEC_NOTIFIER
+ 	struct edid *pedid;
++	struct drm_atomic_state *held;
+ #endif
+ 	struct drm_device *drm = connector->dev;
+-	struct drm_mode_config mode_config = drm->mode_config;
+ 	u8 *edid_raw_buf = NULL;
+ 	int edid_raw_len;
++	bool restore;
++	int hpd;
+ 
++	mutex_lock(&hpd_cb_mutex);
+ 	DRM_INFO("drm hdmitx hpd notify\n");
+ 	if (!hdmitx_get_hpd_state(tx_comm) && !am_hdmi->android_path) {
+ 		drm_modeset_lock(mode_lock, NULL);
+@@ -2592,19 +2645,48 @@ static void meson_hdmitx_hpd_cb(void *data)
+ 	if (hdmitx_get_hpd_state(tx_comm))
+ 		am_hdmi_info.hdcp_rx_type = am_hdmi_info.hdmitx_dev->get_rx_hdcp_cap();
+ 
++	/* the one read the resume-or-suspend branch and hpd_cb_state use */
++	hpd = hdmitx_get_hpd_state(tx_comm);
++	restore = READ_ONCE(hpd_restore);
++
+ #ifdef CONFIG_CEC_NOTIFIER
+-	if (hdmitx_get_hpd_state(tx_comm)) {
++	if (hpd) {
+ 		DRM_DEBUG("%s[%d]\n", __func__, __LINE__);
+ 		pedid = (struct edid *)hdmitx_get_raw_edid(tx_comm);
+ 		cec_notifier_set_phys_addr_from_edid(am_hdmi->cec_notifier,
+ 						     pedid);
+-		if (mode_config.suspend_state)
+-			drm_mode_config_helper_resume(drm);
++		if (drm->mode_config.suspend_state) {
++			if (restore) {
++				drm_mode_config_helper_resume(drm);
++			} else {
++				/*
++				 * hpd_restore=N: drop the saved state and do the
++				 * rest of drm_mode_config_helper_resume() without
++				 * its commit; the state disable_all left stays.
++				 */
++				held = drm->mode_config.suspend_state;
++				drm->mode_config.suspend_state = NULL;
++				drm_atomic_state_put(held);
++				drm_fb_helper_set_suspend_unlocked(drm->fb_helper, 0);
++				if (drm->mode_config.poll_enabled)
++					drm_kms_helper_poll_enable(drm);
++				DRM_INFO("hpd_restore=N: saved state dropped, link left dark\n");
++			}
++		}
+ 	} else {
+ 		DRM_DEBUG("%s[%d]\n", __func__, __LINE__);
+ 		cec_notifier_set_phys_addr(am_hdmi->cec_notifier,
+ 					   CEC_PHYS_ADDR_INVALID);
+-		drm_mode_config_helper_suspend(drm);
++		/*
++		 * A repeated plug-out (fake_plug has no repeat check) would
++		 * overwrite and leak the state an earlier one saved: put it,
++		 * but only once the new suspend has stored its own.
++		 */
++		held = drm->mode_config.suspend_state;
++		if (!drm_mode_config_helper_suspend(drm) && held) {
++			drm_atomic_state_put(held);
++			DRM_INFO("hpd cb: repeated plug-out, earlier saved state put\n");
++		}
+ 	}
+ #endif
+ 
+@@ -2616,7 +2698,21 @@ static void meson_hdmitx_hpd_cb(void *data)
+ 		DRM_ERROR("Failed to update edid_raw property\n");
+ 	kfree(edid_raw_buf);
+ 
++	/* written on every call, whatever the config, before the uevent */
++	meson_hdmitx_hpd_cb_publish(hpd);
++	DRM_INFO("hpd cb: state=%d seq=%u restore=%c\n", hpd,
++		 READ_ONCE(hpd_cb_seq), restore ? 'Y' : 'N');
++
+ 	drm_kms_helper_hotplug_event(am_hdmi->base.connector.dev);
++	mutex_unlock(&hpd_cb_mutex);
++}
++
++void meson_hdmitx_master_drop(void)
++{
++	if (!READ_ONCE(hpd_restore)) {
++		WRITE_ONCE(hpd_restore, true);
++		DRM_INFO("hpd_restore: DRM master dropped, back to Y\n");
++	}
+ }
+ 
+ int meson_hdmitx_dev_bind(struct drm_device *drm,
+@@ -2707,6 +2803,17 @@ int meson_hdmitx_dev_bind(struct drm_device *drm,
+ 	hpd_cb.data = &am_hdmi_info;
+ 	hdmitx_register_hpd_cb(tx_comm, &hpd_cb);
+ 
++	/*
++	 * The probe's own fire may come before this registration (no callback
++	 * at boot), so seed hpd_cb_state here. Under the lock and only while
++	 * the seq is 0, so a callback that ran since the registration is
++	 * never overwritten; the seq stays 0.
++	 */
++	spin_lock(&hpd_cb_lock);
++	if (hpd_cb_seq == 0)
++		WRITE_ONCE(hpd_cb_state, hdmitx_get_hpd_state(tx_comm));
++	spin_unlock(&hpd_cb_lock);
++
+ 	/*hdcp init, default is disable state*/
+ 	if (!am_hdmi_info.android_path) {
+ 		drm_connector_attach_content_protection_property(connector, true);
+diff --git a/drivers/drm/meson_hdmi.h b/drivers/drm/meson_hdmi.h
+index 30ee521..9888ae3 100644
+--- a/drivers/drm/meson_hdmi.h
++++ b/drivers/drm/meson_hdmi.h
+@@ -148,6 +148,7 @@ int meson_hdmitx_dev_bind(struct drm_device *drm,
+ 	int type, struct meson_connector_dev *intf);
+ int meson_hdmitx_dev_unbind(struct drm_device *drm,
+ 	int type, int connector_id);
++void meson_hdmitx_master_drop(void);
+ 
+ void convert_attrstr(char *attr_str, struct hdmitx_color_attr *attr_param);
+ 

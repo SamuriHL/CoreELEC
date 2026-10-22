@@ -164,3 +164,30 @@ sound/soc/amlogic/auge/sharebuffer.c:aml_pll_trim_owner(NULL, NULL);:1
 sound/soc/amlogic/auge/card.c:snd_soc_add_card_controls(&priv->snd_card, &aml_pll_trim_control, 1);:1
 sound/soc/amlogic/Makefile:auge/audio_pll_trim.o:1
 drivers/drm/meson_hdmi.c:(get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE) ||:1
+
+# --- 0023: drm-hpd-no-restore (phase 5 step 5.KH, D13) ---
+# The switch, default Y (an initialiser of false or a lost hunk = a dark
+# link at every plug-in)
+drivers/drm/meson_hdmi.c:static bool hpd_restore = true;:1
+drivers/drm/meson_hdmi.c:module_param(hpd_restore, bool, 0644);:1
+# The read-only pair, its one writer lock, and the callback-wide mutex
+drivers/drm/meson_hdmi.c:module_param(hpd_cb_state, int, 0444);:1
+drivers/drm/meson_hdmi.c:module_param(hpd_cb_seq, uint, 0444);:1
+drivers/drm/meson_hdmi.c:static DEFINE_SPINLOCK(hpd_cb_lock);:1
+drivers/drm/meson_hdmi.c:static DEFINE_MUTEX(hpd_cb_mutex);:1
+drivers/drm/meson_hdmi.c:mutex_lock(&hpd_cb_mutex);:1
+drivers/drm/meson_hdmi.c:mutex_unlock(&hpd_cb_mutex);:1
+# The pair is written in the callback (tail of its hunk) and seeded at the bind
+drivers/drm/meson_hdmi.c:meson_hdmitx_hpd_cb_publish(hpd);:1
+drivers/drm/meson_hdmi.c:if (hpd_cb_seq == 0):1
+# N drops the saved state on the DEVICE's field; the by-value copy must be gone
+drivers/drm/meson_hdmi.c:hpd_restore=N: saved state dropped, link left dark:1
+drivers/drm/meson_hdmi.c:struct drm_mode_config mode_config = drm->mode_config;:0
+drivers/drm/meson_hdmi.c:if (mode_config.suspend_state):0
+# The repeated plug-out put, after a successful suspend (the leak fix, Y too)
+drivers/drm/meson_hdmi.c:if (!drm_mode_config_helper_suspend(drm) && held) {:1
+drivers/drm/meson_hdmi.c:hpd cb: repeated plug-out, earlier saved state put:1
+# The revert when the DRM master drops
+drivers/drm/meson_hdmi.c:void meson_hdmitx_master_drop(void):1
+drivers/drm/meson_hdmi.h:void meson_hdmitx_master_drop(void);:1
+drivers/drm/meson_drv.c:.master_drop		= am_meson_drm_master_drop,:1
