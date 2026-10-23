@@ -1,0 +1,69 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 22 Oct 2026 21:50:00 -0400
+Subject: [PATCH] drm/meson_hdmi: the HPD-rise restore always sets the link
+ up again
+
+Before 0024 every HPD-rise restore was a full modeset: the reset made
+it start from a disabled CRTC, so the returning sink's link was always
+set up again (the TMDS/SCDC set-up; HDCP too off android_path).
+Without the reset, a restore whose saved state equals the live one (a
+commit lit the same mode after the plug-out) commits nothing, and the
+sink gets no link set-up from the kernel.
+
+0024 cleared hdmitx_on at the rise for this, but the branch that reads
+it (meson_hdmitx_atomic_check) runs only when android_path is 0, and
+CoreELEC runs with android_path 1 (hdcp_ctl_lvl 0): the clear was
+inert there, and a same-state restore was seen committing nothing.
+
+Set the saved hdmitx connector state's update flag instead, as the
+update_attr property does. The check then forces connectors_changed
+whatever the path. Duplication clears the flag, so it holds for the
+restore's commit only. The inert hdmitx_on clear is removed.
+
+---
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -2629,7 +2629,21 @@
+ {
+ 	struct drm_atomic_state *state = drm->mode_config.suspend_state;
+ 	struct drm_modeset_acquire_ctx ctx;
+-	int err;
++	struct drm_connector *conn;
++	struct drm_connector_state *conn_state;
++	int err, i;
++
++	/*
++	 * The sink came back, so its link must be set up again (SCDC, HDCP).
++	 * The reset forced that by making every restore start from a disabled
++	 * CRTC. Ask for it as the update_attr property does: the saved hdmitx
++	 * state's update flag makes the check force connectors_changed, under
++	 * android_path too. Duplication clears the flag, so it holds for this
++	 * commit only.
++	 */
++	for_each_new_connector_in_state(state, conn, conn_state, i)
++		if (conn == &am_hdmi_info.base.connector)
++			to_am_hdmitx_connector_state(conn_state)->update = true;
+ 
+ 	DRM_MODESET_LOCK_ALL_BEGIN(drm, ctx, 0, err);
+ 	err = drm_atomic_helper_commit_duplicated_state(state, &ctx);
+@@ -2688,19 +2702,6 @@
+ 		cec_notifier_set_phys_addr_from_edid(am_hdmi->cec_notifier,
+ 						     pedid);
+ 		if (drm->mode_config.suspend_state) {
+-			/*
+-			 * The sink came back: its link must be set up again
+-			 * (SCDC, HDCP); the reset forced that by making every
+-			 * restore start from a disabled CRTC. hdmitx_on 0
+-			 * forces the modeset, as after the plug-out above,
+-			 * but like that branch only off android_path: with
+-			 * android_path 1 a same-state restore commits nothing.
+-			 */
+-			if (!am_hdmi->android_path) {
+-				drm_modeset_lock(mode_lock, NULL);
+-				am_hdmi_info.hdmitx_on = 0;
+-				drm_modeset_unlock(mode_lock);
+-			}
+ 			if (restore) {
+ 				meson_hdmitx_hpd_resume(drm);
+ 			} else {

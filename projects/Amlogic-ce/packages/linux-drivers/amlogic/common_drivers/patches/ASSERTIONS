@@ -205,5 +205,12 @@ drivers/drm/meson_hdmi.c:hpd cb: repeated plug-out, first saved state kept:1
 # A plug-out still saves the state (a lost else-branch compiles and saves nothing)
 drivers/drm/meson_hdmi.c:drm_mode_config_helper_suspend(drm);:1
 drivers/drm/meson_hdmi.c:drm->mode_config.suspend_state = NULL;:2
-# The rise forces the link set-up again (SCDC, HDCP) without the reset
-drivers/drm/meson_hdmi.c:am_hdmi_info.hdmitx_on = 0;:3
+# hdmitx_on is cleared only by the encoder disable and the plug-out (0025
+# removed 0024's rise clear)
+drivers/drm/meson_hdmi.c:am_hdmi_info.hdmitx_on = 0;:2
+
+# --- 0025: drm-hpd-restore-sets-the-link-up (issue 28, android_path) ---
+# The restore asks for the link set-up through the saved hdmitx state's update
+# flag (0024's inert hdmitx_on clear is gone: the count above is back to 2)
+drivers/drm/meson_hdmi.c:to_am_hdmitx_connector_state(conn_state)->update = true;:1
+drivers/drm/meson_hdmi.c:for_each_new_connector_in_state(state, conn, conn_state, i):1
