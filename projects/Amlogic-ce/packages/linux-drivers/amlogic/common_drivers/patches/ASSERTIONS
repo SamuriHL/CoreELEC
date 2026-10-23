@@ -184,10 +184,26 @@ drivers/drm/meson_hdmi.c:if (hpd_cb_seq == 0):1
 drivers/drm/meson_hdmi.c:hpd_restore=N: saved state dropped, link left dark:1
 drivers/drm/meson_hdmi.c:struct drm_mode_config mode_config = drm->mode_config;:0
 drivers/drm/meson_hdmi.c:if (mode_config.suspend_state):0
-# The repeated plug-out put, after a successful suspend (the leak fix, Y too)
-drivers/drm/meson_hdmi.c:if (!drm_mode_config_helper_suspend(drm) && held) {:1
-drivers/drm/meson_hdmi.c:hpd cb: repeated plug-out, earlier saved state put:1
+# The repeated plug-out put 0023 added is replaced by 0024's keep-first
+drivers/drm/meson_hdmi.c:if (!drm_mode_config_helper_suspend(drm) && held) {:0
+drivers/drm/meson_hdmi.c:hpd cb: repeated plug-out, earlier saved state put:0
 # The revert when the DRM master drops
 drivers/drm/meson_hdmi.c:void meson_hdmitx_master_drop(void):1
 drivers/drm/meson_hdmi.h:void meson_hdmitx_master_drop(void);:1
 drivers/drm/meson_drv.c:.master_drop		= am_meson_drm_master_drop,:1
+
+# --- 0024: drm-hpd-restore-under-locks (issue 28) ---
+# The rise restores through the locked helper; the reset-first helper is gone
+# from the callback (a lost hunk = the use-after-free back)
+drivers/drm/meson_hdmi.c:static void meson_hdmitx_hpd_resume(struct drm_device *drm):1
+drivers/drm/meson_hdmi.c:meson_hdmitx_hpd_resume(drm);:1
+drivers/drm/meson_hdmi.c:drm_mode_config_helper_resume(drm);:0
+drivers/drm/meson_hdmi.c:err = drm_atomic_helper_commit_duplicated_state(state, &ctx);:1
+drivers/drm/meson_hdmi.c:hpd resume failed (%d):1
+# A repeated plug-out keeps the first saved state
+drivers/drm/meson_hdmi.c:hpd cb: repeated plug-out, first saved state kept:1
+# A plug-out still saves the state (a lost else-branch compiles and saves nothing)
+drivers/drm/meson_hdmi.c:drm_mode_config_helper_suspend(drm);:1
+drivers/drm/meson_hdmi.c:drm->mode_config.suspend_state = NULL;:2
+# The rise forces the link set-up again (SCDC, HDCP) without the reset
+drivers/drm/meson_hdmi.c:am_hdmi_info.hdmitx_on = 0;:3

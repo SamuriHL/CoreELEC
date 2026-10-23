@@ -1,0 +1,135 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Thu, 22 Oct 2026 19:00:00 -0400
+Subject: [PATCH] drm/meson_hdmi: restore at an HPD rise under the locks, and
+ keep the first saved state
+
+The HPD-rise restore called drm_mode_config_helper_resume(), whose
+drm_atomic_helper_resume() runs drm_mode_config_reset() before it takes
+any modeset lock. meson_crtc_reset() frees the live CRTC state (and the
+plane and connector resets theirs) while a commit that has already
+swapped in its state is running. With a userspace mode set in flight at
+the rise, commit_hw_done WARNs on the stale event (drm_atomic_helper.c
+2383), or, when the zeroed replacement reuses the freed object, the
+commit loses its commit pointer and commit_cleanup_done deletes the
+previous commit a second time: list_del corruption and a panic
+(CONFIG_BUG_ON_DATA_CORRUPTION). Both were seen under a fast fake_plug
+pattern, the panic on G12B.
+
+That reset is for driver load and system resume, where the hardware
+state was lost. At an HPD rise nothing was lost. Restore with
+drm_atomic_helper_commit_duplicated_state() under
+DRM_MODESET_LOCK_ALL, without the reset; it points each saved state's
+old state at the live one, so the commit is an ordinary transition from
+what is really lit. The rest is drm_mode_config_helper_resume()'s
+order: clear suspend_state, fbdev un-suspend, poll enable. The system
+resume path (am_meson_drm_pm_resume) is not changed.
+
+The reset also made every restore a full modeset (the CRTC started
+disabled), so the returning sink's link was always set up again (SCDC,
+HDCP). Without it, a commit that lit the same mode after the plug-out
+would leave the restore a plane update. Clear hdmitx_on at the rise,
+under connection_mutex as the plug-out does, so the next modeset
+(the restore under Y, userspace's under N) sets the link up again.
+Like the branch it relies on (meson_hdmitx_atomic_check), this runs
+only when android_path is 0; CoreELEC runs with android_path 1
+(hdcp_ctl_lvl 0), where a same-state restore is not a modeset.
+
+A repeated plug-out (fake_plug, the probe's fire and PM resume have no
+repeat check; the IRQ paths ignore one) saved the already dark state
+over the lit one, so the rise restored nothing. Keep the first saved
+state and skip the second suspend. When something committed between
+the two plug-outs, the rise now restores the older, first state. This
+replaces the put 0023 added for the same case. Under hpd_restore=N the
+rise still drops the state.
+
+---
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -2613,6 +2613,38 @@
+ 	spin_unlock(&hpd_cb_lock);
+ }
+ 
++#ifdef CONFIG_CEC_NOTIFIER
++/*
++ * The HPD-rise restore: drm_mode_config_helper_resume() without the
++ * drm_mode_config_reset() its drm_atomic_helper_resume() runs before taking
++ * any lock. That reset is for driver load and system resume, where the
++ * hardware state was lost. At an HPD rise nothing was lost, and the reset
++ * freed the live CRTC, plane and connector states under a commit already in
++ * flight (a use-after-free: commit_hw_done WARNs, or a double list_del in
++ * commit_cleanup_done and a panic). commit_duplicated_state points each
++ * saved state's old state at the live one, so this is an ordinary commit
++ * from what is really lit, made under every modeset lock.
++ */
++static void meson_hdmitx_hpd_resume(struct drm_device *drm)
++{
++	struct drm_atomic_state *state = drm->mode_config.suspend_state;
++	struct drm_modeset_acquire_ctx ctx;
++	int err;
++
++	DRM_MODESET_LOCK_ALL_BEGIN(drm, ctx, 0, err);
++	err = drm_atomic_helper_commit_duplicated_state(state, &ctx);
++	DRM_MODESET_LOCK_ALL_END(drm, ctx, err);
++	drm_atomic_state_put(state);
++	if (err)
++		DRM_ERROR("hpd resume failed (%d)\n", err);
++	drm->mode_config.suspend_state = NULL;
++
++	drm_fb_helper_set_suspend_unlocked(drm->fb_helper, 0);
++	if (drm->mode_config.poll_enabled)
++		drm_kms_helper_poll_enable(drm);
++}
++#endif
++
+ static void meson_hdmitx_hpd_cb(void *data)
+ {
+ 	struct am_hdmi_tx *am_hdmi = (struct am_hdmi_tx *)data;
+@@ -2656,8 +2688,21 @@
+ 		cec_notifier_set_phys_addr_from_edid(am_hdmi->cec_notifier,
+ 						     pedid);
+ 		if (drm->mode_config.suspend_state) {
++			/*
++			 * The sink came back: its link must be set up again
++			 * (SCDC, HDCP); the reset forced that by making every
++			 * restore start from a disabled CRTC. hdmitx_on 0
++			 * forces the modeset, as after the plug-out above,
++			 * but like that branch only off android_path: with
++			 * android_path 1 a same-state restore commits nothing.
++			 */
++			if (!am_hdmi->android_path) {
++				drm_modeset_lock(mode_lock, NULL);
++				am_hdmi_info.hdmitx_on = 0;
++				drm_modeset_unlock(mode_lock);
++			}
+ 			if (restore) {
+-				drm_mode_config_helper_resume(drm);
++				meson_hdmitx_hpd_resume(drm);
+ 			} else {
+ 				/*
+ 				 * hpd_restore=N: drop the saved state and do the
+@@ -2678,15 +2723,16 @@
+ 		cec_notifier_set_phys_addr(am_hdmi->cec_notifier,
+ 					   CEC_PHYS_ADDR_INVALID);
+ 		/*
+-		 * A repeated plug-out (fake_plug has no repeat check) would
+-		 * overwrite and leak the state an earlier one saved: put it,
+-		 * but only once the new suspend has stored its own.
++		 * A repeated plug-out (fake_plug, the probe's fire and PM resume
++		 * have no repeat check; the IRQ paths ignore one) keeps the
++		 * first saved state: a second suspend would save the already
++		 * dark state over the lit one, and the rise would restore
++		 * nothing.
+ 		 */
+-		held = drm->mode_config.suspend_state;
+-		if (!drm_mode_config_helper_suspend(drm) && held) {
+-			drm_atomic_state_put(held);
+-			DRM_INFO("hpd cb: repeated plug-out, earlier saved state put\n");
+-		}
++		if (drm->mode_config.suspend_state)
++			DRM_INFO("hpd cb: repeated plug-out, first saved state kept\n");
++		else
++			drm_mode_config_helper_suspend(drm);
+ 	}
+ #endif
+ 
