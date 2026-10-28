@@ -214,3 +214,13 @@ drivers/drm/meson_hdmi.c:am_hdmi_info.hdmitx_on = 0;:2
 # flag (0024's inert hdmitx_on clear is gone: the count above is back to 2)
 drivers/drm/meson_hdmi.c:to_am_hdmitx_connector_state(conn_state)->update = true;:1
 drivers/drm/meson_hdmi.c:for_each_new_connector_in_state(state, conn, conn_state, i):1
+
+
+# --- 0027: drm-dv-predict-at-dark-enable (P5-79) ---
+# The plug-out latches the TV-led DV source before the suspend's disable, a
+# dark decision needs the same source, and both DV branches read dv_out
+drivers/drm/meson_hdmi.c:module_param(dv_predict, bool, 0644);:1
+drivers/drm/meson_hdmi.c:			WRITE_ONCE(dv_plugout_src, src);:1
+drivers/drm/meson_hdmi.c:		   get_amdv_src_format(VD1_PATH) == READ_ONCE(dv_plugout_src) &&:1
+drivers/drm/meson_hdmi.c:	if (dv_out) {:2
+drivers/drm/meson_hdmi.c:#include <linux/amlogic/media/vout/vout_notify.h>:1

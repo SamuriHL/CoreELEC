@@ -1,0 +1,175 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Wed, 28 Oct 2026 11:15:00 -0400
+Subject: [PATCH] drm/meson_hdmi: keep a TV-led DV link format for the dark
+ enable at a reconnect (P5-79)
+
+At a plug-out the CRTC is disabled and the hdmitx vout info loses the
+sink, so the DV core, which reads its sink from the vout info, drops to
+SDR8 within a frame. At the reconnect the enable's colour decision then
+reads that SDR8 target and sets up a 422 12-bit link. The core returns
+to DV only after the enable has attached the EDID again, and a second
+link set-up gives the TV its 444 8-bit tunnel: two relocks.
+
+Each lit decision records the source format of a TV-led DV output (the
+IPT tunnel, LL off). The plug-out latches the core's own TV-led reading
+before the suspend. A real plug-out has detached the EDID already, which
+can only move the core away from DV; once it has dropped, the last lit
+decision's reading is latched instead. While the vout info is null or
+invalid (the dark enable), the decision keeps DV when amdv is enabled,
+LL is off, the source is the latched one and the sink's parsed EDID
+offers standard DV at the mode (sink_dv_support()'s exclusions). Any
+decision on a lit vout clears the latch. A missed latch gives the
+previous two set-ups; a wrong prediction can only give a 444 8-bit link,
+not a DV signal over a 422 12-bit one.
+
+dv_predict=N gives the previous decision.
+
+---
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -26,6 +26,7 @@
+ #include <linux/amlogic/media/vout/hdmitx_common/hdmitx_types.h>
+ #include <linux/amlogic/media/amdolbyvision/dolby_vision.h>
+ #include <linux/amlogic/media/amvecm/amvecm.h>
++#include <linux/amlogic/media/vout/vout_notify.h>
+ #include <linux/miscdevice.h>
+ #include <linux/moduleparam.h>
+ #include <linux/mutex.h>
+@@ -334,6 +335,54 @@
+ 	       mode != AMDV_OUTPUT_MODE_SDR8;
+ }
+ 
++/*
++ * dv_predict (P5-79): at a reconnect the DV core reads its sink from the vout
++ * info, which the dark CRTC no longer carries, so it reports SDR8 until the
++ * enable has attached the EDID again. The enable's decision then sets up a
++ * non-DV link, and the core's return to DV needs a second link set-up.
++ * Y: a TV-led DV output at the plug-out is kept for the decisions of the dark
++ * enable, while the source is the same and the sink's parsed EDID offers
++ * standard DV at the mode.
++ * N: the core's target alone decides.
++ */
++static bool dv_predict = true;
++module_param(dv_predict, bool, 0644);
++MODULE_PARM_DESC(dv_predict,
++		 "Y (default): a dark enable keeps the plug-out's TV-led DV link format. N: the DV core's current target only");
++/* source format of a TV-led DV output, -1 for none */
++static int dv_lit_src = -1;
++static int dv_plugout_src = -1;
++
++static int dv_tvled_src(void)
++{
++	if (!is_amdv_enable() || get_amdv_ll_policy() != 0 ||
++	    get_amdv_target_mode() != AMDV_OUTPUT_MODE_IPT_TUNNEL)
++		return -1;
++	return get_amdv_src_format(VD1_PATH);
++}
++
++/* refer to sink_dv_support(): standard DV at this mode */
++static bool dv_sink_std_at(const struct drm_display_mode *mode)
++{
++	const struct dv_info *dv = hdmitx_common_get_dv_info();
++	const char *n = mode->name;
++
++	if (!dv || dv->ieeeoui != DV_IEEE_OUI || dv->block_flag != CORRECT)
++		return false;
++	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
++		return false;
++	if ((strstr(n, "2160p60hz") || strstr(n, "2160p50hz")) && !dv->sup_2160p60hz)
++		return false;
++	if ((strstr(n, "120hz") || strstr(n, "100hz")) && !dv->sup_1080p120hz)
++		return false;
++	if (strstr(n, "2160p100hz") || strstr(n, "2160p120hz"))
++		return false;
++	if (strstr(n, "480p") || strstr(n, "576p") || strstr(n, "smpte"))
++		return false;
++	/* version 2 with Interface <= 1 is LL only */
++	return !(dv->ver == 2 && dv->Interface <= 1);
++}
++
+ static int meson_hdmitx_decide_color_attr
+ 	(struct hdmitx_common *common, struct am_meson_crtc_state *crtc_state,
+ 	struct hdmitx_color_attr *attr, u64 sequence_id)
+@@ -343,6 +392,9 @@
+ 	enum hdmi_vic vic;
+ 	char* colour_sampling[] = {"RGB","YUV422","YUV444","YUV420"};
+ 	struct hdmitx_color_attr fmt_attr = {};
++	const struct vinfo_s *vi;
++	bool dark;
++	bool dv_out = is_amdv_output_dv();
+ 
+ 	if (!outputmode) {
+ 		DRM_ERROR("%s current mode empty.\n", __func__);
+@@ -355,6 +407,20 @@
+ 		return -EINVAL;
+ 	}
+ 
++	vi = get_current_vinfo();
++	dark = !vi || !vi->name || !strcmp(vi->name, "null") || !strcmp(vi->name, "invalid");
++	if (!dark) {
++		WRITE_ONCE(dv_plugout_src, -1);
++		WRITE_ONCE(dv_lit_src, dv_tvled_src());
++	} else if (!dv_out && READ_ONCE(dv_predict) && READ_ONCE(dv_plugout_src) >= 0 &&
++		   is_amdv_enable() && get_amdv_ll_policy() == 0 &&
++		   get_amdv_src_format(VD1_PATH) == READ_ONCE(dv_plugout_src) &&
++		   dv_sink_std_at(&crtc_state->base.adjusted_mode)) {
++		dv_out = true;
++		DRM_INFO("dv_predict %s: TV-led DV at the plug-out, kept for this dark enable\n",
++			 outputmode);
++	}
++
+ 	// set default
+ 	comm_state.state_sequence_id = sequence_id;
+ 	attr->colorformat = HDMI_COLORSPACE_YUV444;
+@@ -367,7 +433,7 @@
+ 	// try autoselect
+ 	// check if any colour subsampling is set
+ 	// force colour subsampling when DV mode
+-	if (is_amdv_output_dv()) {
++	if (dv_out) {
+ 		int cs = attr->colorformat;
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->colorformat = HDMI_COLORSPACE_YUV444;
+@@ -410,7 +476,7 @@
+ 
+ 	// check for bit colourdepth limit
+ 	// force bit colourdepth when DV mode
+-	if (is_amdv_output_dv()) {
++	if (dv_out) {
+ 		int cd = bitdepth_to_colordepth(attr->bitdepth);
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->bitdepth = colordepth_to_bitdepth(COLORDEPTH_24B);
+@@ -2724,10 +2790,30 @@
+ 		 * dark state over the lit one, and the rise would restore
+ 		 * nothing.
+ 		 */
+-		if (drm->mode_config.suspend_state)
++		if (drm->mode_config.suspend_state) {
+ 			DRM_INFO("hpd cb: repeated plug-out, first saved state kept\n");
+-		else
++		} else {
++			/*
++			 * Before the suspend's disable. A real plug-out has
++			 * detached the EDID already, which can only move the
++			 * core away from DV: a TV-led reading stands, and once
++			 * the core has dropped, the last lit decision's.
++			 */
++			const struct vinfo_s *vi = get_current_vinfo();
++			bool sink = vi && vi->vout_device && vi->vout_device->dv_info &&
++				    vi->vout_device->dv_info->ieeeoui == DV_IEEE_OUI;
++			int src = dv_tvled_src();
++			bool lit = src < 0 && !sink;
++
++			if (lit)
++				src = READ_ONCE(dv_lit_src);
++
++			WRITE_ONCE(dv_plugout_src, src);
++			DRM_INFO("dv_predict: plug-out target %d src %d, sink %s, latch %d (%s)\n",
++				 get_amdv_target_mode(), get_amdv_src_format(VD1_PATH),
++				 sink ? "attached" : "detached", src, lit ? "lit" : "live");
+ 			drm_mode_config_helper_suspend(drm);
++		}
+ 	}
+ #endif
+ 
