@@ -1,0 +1,79 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Wed, 28 Oct 2026 19:30:00 -0400
+Subject: [PATCH] drm/meson_hdmi: sample the TV-led DV source at each vblank
+ (P5-79)
+
+0027's plug-out falls back to the last lit decision's TV-led DV source
+when a real plug-out has dropped the core to SDR8 before the callback
+reads it. A lit decision is only taken at a commit, so after a film's
+start (committed while the core was still in bypass, before DV
+engaged) the record reads none, and a cable pull mid-film still gives
+two link set-ups.
+
+Sample the source at each vblank while the vout carries the sink's DV
+EDID. A real plug-out detaches the EDID before the core drops, so the
+sampling stops on the attached reading, which the plug-out then
+latches. Reads only; no hardware writes. dv_predict=N is unaffected:
+the record is only read by a prediction.
+
+---
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -361,6 +361,22 @@
+ 	return get_amdv_src_format(VD1_PATH);
+ }
+ 
++/*
++ * Each vblank while the vout carries the sink's DV EDID: a real plug-out
++ * detaches it before the core drops to SDR8, so the last attached reading
++ * stands for the plug-out.
++ */
++void meson_hdmitx_dv_sample(void)
++{
++	const struct vinfo_s *vi = get_current_vinfo();
++
++	if (!vi || !vi->name || !strcmp(vi->name, "null") || !strcmp(vi->name, "invalid") ||
++	    !vi->vout_device || !vi->vout_device->dv_info ||
++	    vi->vout_device->dv_info->ieeeoui != DV_IEEE_OUI)
++		return;
++	WRITE_ONCE(dv_lit_src, dv_tvled_src());
++}
++
+ /* refer to sink_dv_support(): standard DV at this mode */
+ static bool dv_sink_std_at(const struct drm_display_mode *mode)
+ {
+diff --git a/drivers/drm/meson_hdmi.h b/drivers/drm/meson_hdmi.h
+--- a/drivers/drm/meson_hdmi.h
++++ b/drivers/drm/meson_hdmi.h
+@@ -149,6 +149,7 @@
+ int meson_hdmitx_dev_unbind(struct drm_device *drm,
+ 	int type, int connector_id);
+ void meson_hdmitx_master_drop(void);
++void meson_hdmitx_dv_sample(void);
+ 
+ void convert_attrstr(char *attr_str, struct hdmitx_color_attr *attr_param);
+ 
+diff --git a/drivers/drm/meson_vpu.c b/drivers/drm/meson_vpu.c
+--- a/drivers/drm/meson_vpu.c
++++ b/drivers/drm/meson_vpu.c
+@@ -33,6 +33,9 @@
+ #include "meson_vpu.h"
+ #include "meson_plane.h"
+ #include "meson_crtc.h"
++#ifndef CONFIG_AMLOGIC_DRM_CUT_HDMI
++#include "meson_hdmi.h"
++#endif
+ #include "meson_vpu_pipeline.h"
+ #include "vpu-hw/meson_vpu_postblend.h"
+ 
+@@ -151,6 +154,9 @@
+ 
+ 	meson_drm_signal_present_fence(amcrtc);
+ 	meson_drm_handle_vpp_crc(amcrtc);
++#ifndef CONFIG_AMLOGIC_DRM_CUT_HDMI
++	meson_hdmitx_dv_sample();
++#endif
+ }
+ 
+ static irqreturn_t am_meson_vpu_irq(int irq, void *arg)

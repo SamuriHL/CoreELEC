@@ -224,3 +224,9 @@ drivers/drm/meson_hdmi.c:			WRITE_ONCE(dv_plugout_src, src);:1
 drivers/drm/meson_hdmi.c:		   get_amdv_src_format(VD1_PATH) == READ_ONCE(dv_plugout_src) &&:1
 drivers/drm/meson_hdmi.c:	if (dv_out) {:2
 drivers/drm/meson_hdmi.c:#include <linux/amlogic/media/vout/vout_notify.h>:1
+
+# --- 0028: drm-dv-sample-at-vblank (P5-79) ---
+# Each vblank samples the TV-led DV source while the sink's DV EDID is attached
+drivers/drm/meson_hdmi.c:void meson_hdmitx_dv_sample(void):1
+drivers/drm/meson_hdmi.h:void meson_hdmitx_dv_sample(void);:1
+drivers/drm/meson_vpu.c:	meson_hdmitx_dv_sample();:1
