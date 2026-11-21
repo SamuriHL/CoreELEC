@@ -1,0 +1,56 @@
+From: SamuriHL <samurihl@msn.com>
+Subject: amvecm: process an osd_pq_passthrough change without a new frame (phase 5 step 5.K, D-G2-7)
+
+A change of osd_pq_passthrough lands only with a new frame: while paused,
+on a still or with the layer off it waits (measured, O7b). Treat the change
+as a sink cap change once per new value, so the next vsync processes it
+(repeat frame, last frame, or the idle fake frame). knob_force_process=0
+(the default) gives the old behaviour: the kernel is unpatched in effect
+until the player writes 1. Measured as O7b on G12B and S6 (2026-10-12):
+paused, still and layer-off changes land at the next vsync, processed once.
+
+--- a/drivers/media/enhancement/amvecm/amcsc.c
++++ b/drivers/media/enhancement/amvecm/amcsc.c
+@@ -543,6 +543,13 @@
+ static uint cur_primary_policy;
+ static uint cur_osd_pq_passthrough;
+ #endif
++/* 1: a change of osd_pq_passthrough is processed at the next vsync even with
++ * nothing toggling (paused, a still, the layer off), like a sink cap change.
++ * 0: as before (the change waits for the next new frame).
++ */
++static uint knob_force_process = 0;
++module_param(knob_force_process, uint, 0664);
++MODULE_PARM_DESC(knob_force_process, "\n process an osd_pq_passthrough change without a new frame\n");
+ module_param(primary_policy, uint, 0664);
+ MODULE_PARM_DESC(primary_policy, "\n current primary_policy\n");
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+@@ -9288,6 +9295,28 @@
+ 	if (is_video_turn_on(video_on, vd_path) == 1)
+ 		cap_changed = true;
+ 
++#ifndef CONFIG_AMLOGIC_ZAPPER_CUT
++	/* An osd_pq_passthrough change is sampled only in vpp_matrix_update,
++	 * which runs on a new frame, or on a repeat/last frame with a forced
++	 * process or a cap change, and not at all while idle. Treat the change
++	 * as a cap change once per new value, so it lands at the next vsync
++	 * whether or not anything toggles.
++	 */
++	if (knob_force_process && vd_path == VD1_PATH) {
++		static uint forced_osd_pq;
++		uint osd_pq_now = READ_ONCE(osd_pq_passthrough);
++
++		if (osd_pq_now == cur_osd_pq_passthrough) {
++			forced_osd_pq = osd_pq_now;
++		} else if (osd_pq_now != forced_osd_pq) {
++			forced_osd_pq = osd_pq_now;
++			cap_changed = true;
++			pr_csc(4, "vd%d: osd_pq_passthrough %d -> %d, force process\n",
++			       vd_path + 1, cur_osd_pq_passthrough, osd_pq_now);
++		}
++	}
++#endif
++
+ 	if (vf && (flags & CSC_FLAG_CHECK_OUTPUT)) {
+ 		ret = vpp_matrix_update(vf, vinfo, flags, vd_path, vpp_index);
+ 		if (ret == 1) {

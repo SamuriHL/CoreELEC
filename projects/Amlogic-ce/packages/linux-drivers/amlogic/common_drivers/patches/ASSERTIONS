@@ -230,3 +230,8 @@ drivers/drm/meson_hdmi.c:#include <linux/amlogic/media/vout/vout_notify.h>:1
 drivers/drm/meson_hdmi.c:void meson_hdmitx_dv_sample(void):1
 drivers/drm/meson_hdmi.h:void meson_hdmitx_dv_sample(void);:1
 drivers/drm/meson_vpu.c:	meson_hdmitx_dv_sample();:1
+# --- 0029: amvecm-osd-pq-change-forces-process (phase 5 step 5.K, D-G2-7) ---
+# A changed osd_pq_passthrough counts as a cap change once per new value when knob_force_process=1 (default 0)
+drivers/media/enhancement/amvecm/amcsc.c:module_param(knob_force_process, uint, 0664);:1
+drivers/media/enhancement/amvecm/amcsc.c:if (knob_force_process && vd_path == VD1_PATH) {:1
+drivers/media/enhancement/amvecm/amcsc.c:} else if (osd_pq_now != forced_osd_pq) {:1
