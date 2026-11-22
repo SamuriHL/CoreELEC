@@ -152,3 +152,12 @@ drivers/media/enhancement/amdolby_vision/amdv.c:FLAG_FORCE_CVM | FLAG_USE_SINK_M
 #   8646fbd1 revert: the DRM hdr_policy/force_output properties must stay out
 #   (partner of the xbmc HDR10 controls we reverted on 10-30, D4/D5).
 drivers/drm/meson_crtc.c:meson_crtc_init_hdr_policy_property:0
+
+# --- 0023/0024: DV purple at start (ce-canary 26856d57f + 06c2e82b6, matthane) ---
+# the policy answers for a given mode, and atomic_check decides the DV colour
+# attrs for the mode being set, not the old mode's HDR10 target
+drivers/media/enhancement/amdolby_vision/amdv.c:static enum signal_format_enum cur_src_format_or(enum signal_format_enum unknown):1
+drivers/media/enhancement/amdolby_vision/amdv.c:static int amdv_policy_process_for(struct vframe_s *vf, int *mode,:1
+drivers/drm/meson_hdmi.c:static bool is_amdv_output_dv(const struct drm_display_mode *drm_mode):1
+drivers/drm/meson_hdmi.c:mode = get_amdv_mode_for(&next);:1
+include/linux/amlogic/media/amdolbyvision/dolby_vision.h:get_amdv_mode_for(:1

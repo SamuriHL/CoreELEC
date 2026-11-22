@@ -1,0 +1,151 @@
+From 06c2e82b6f51e71ec20fda0dd7da600db761e8e8 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 7 Nov 2026 09:06:18 -0600
+Subject: [PATCH] meson_hdmi: decide DV colour attrs for the mode being set
+
+The decide reads the engine's target, set against the mode being left.
+A DV clip starting from a mode the sink refuses, such as 1080p120
+without the parity bit, targets HDR10 then. The new mode gets non-DV
+attrs, the engine returns to DV on a 10-bit pipe, and the AVI says 422
+on a 30-bit pipe: a purple picture.
+---
+ drivers/drm/meson_hdmi.c                      | 28 ++++++++++++++-----
+ .../media/enhancement/amdolby_vision/amdv.c   | 22 +++++++++++++--
+ .../media/amdolbyvision/dolby_vision.h        |  1 +
+ 3 files changed, 41 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/drm/meson_hdmi.c b/drivers/drm/meson_hdmi.c
+index 61fc8dca4..09906cc1d 100644
+--- a/drivers/drm/meson_hdmi.c
++++ b/drivers/drm/meson_hdmi.c
+@@ -286,12 +286,25 @@ static bool meson_hdmitx_test_color_attr(struct hdmitx_common *common,
+ 		return true;
+ }
+ 
+-static bool is_amdv_output_dv(void)
+-{
+-	int mode = get_amdv_target_mode();
++static bool is_amdv_output_dv(const struct drm_display_mode *drm_mode)
++{
++	bool interlaced = drm_mode->flags & DRM_MODE_FLAG_INTERLACE;
++	struct vout_device_s dev = { .dv_info = hdmitx_common_get_dv_info() };
++	struct vinfo_s next = {
++		.name = (char *)drm_mode->name,
++		.height = drm_mode->vdisplay,
++		.field_height = interlaced ? drm_mode->vdisplay / 2 : drm_mode->vdisplay,
++		.hdr_info = *hdmitx_common_get_hdr_info(),
++		.vout_device = &dev,
++	};
++	int mode;
++
++	if (!is_amdv_enable())
++		return false;
++
++	mode = get_amdv_mode_for(&next);
+ 
+-	return is_amdv_enable() &&
+-	       mode != AMDV_OUTPUT_MODE_HDR10 &&
++	return mode != AMDV_OUTPUT_MODE_HDR10 &&
+ 	       mode != AMDV_OUTPUT_MODE_SDR10 &&
+ 	       mode != AMDV_OUTPUT_MODE_SDR8;
+ }
+@@ -305,6 +318,7 @@ static int meson_hdmitx_decide_color_attr
+ 	enum hdmi_vic vic;
+ 	char* colour_sampling[] = {"RGB","YUV422","YUV444","YUV420"};
+ 	struct hdmitx_color_attr fmt_attr = {};
++	bool dv_output = is_amdv_output_dv(&crtc_state->base.adjusted_mode);
+ 
+ 	if (!outputmode) {
+ 		DRM_ERROR("%s current mode empty.\n", __func__);
+@@ -329,7 +343,7 @@ static int meson_hdmitx_decide_color_attr
+ 	// try autoselect
+ 	// check if any colour subsampling is set
+ 	// force colour subsampling when DV mode
+-	if (is_amdv_output_dv()) {
++	if (dv_output) {
+ 		int cs = attr->colorformat;
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->colorformat = HDMI_COLORSPACE_YUV444;
+@@ -372,7 +386,7 @@ static int meson_hdmitx_decide_color_attr
+ 
+ 	// check for bit colourdepth limit
+ 	// force bit colourdepth when DV mode
+-	if (is_amdv_output_dv()) {
++	if (dv_output) {
+ 		int cd = bitdepth_to_colordepth(attr->bitdepth);
+ 		if (get_amdv_ll_policy() == 0 /* DOLBY_VISION_LL_DISABLE */) {
+ 			attr->bitdepth = colordepth_to_bitdepth(COLORDEPTH_24B);
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index b20dba2f2..d7cfd10c4 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -2624,8 +2624,10 @@ EXPORT_SYMBOL(dv_inst_map);
+ 
+ void dv_inst_unmap(int inst)
+ {
+-	if (!multi_dv_mode)
++	if (!multi_dv_mode) {
++		amdv_src_format = 0;
+ 		return;
++	}
+ 
+ 	pr_info("%s %d\n", __func__, inst);
+ 
+@@ -2634,6 +2636,7 @@ void dv_inst_unmap(int inst)
+ 	if (dv_inst_valid(inst) && dv_inst[inst].mapped) {
+ 		dv_inst[inst].mapped = false;
+ 		last_unmap_id = inst;
++		dv_inst[inst].amdv_src_format = 0;
+ 		{
+ 			void *parser = rcu_dereference_protected
+ 				(dv_inst[inst].metadata_parser,
+@@ -8429,7 +8432,8 @@ int amdv_parse_metadata_v1(struct vframe_s *vf,
+ 
+ 	check_format = src_format;
+ 	if (vf) {
+-		update_src_format(check_format, vf);
++		if (toggle_mode != 2)
++			update_src_format(check_format, vf);
+ 		last_current_format = check_format;
+ 	}
+ 
+@@ -10233,7 +10237,8 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 
+ 	check_format = src_format;
+ 	if (vf) {
+-		update_src_format(check_format, vf);
++		if (toggle_mode != 2)
++			update_src_format(check_format, vf);
+ 		last_current_format = check_format;
+ 	}
+ 
+@@ -14076,6 +14081,17 @@ int get_amdv_target_mode(void)
+ }
+ EXPORT_SYMBOL(get_amdv_target_mode);
+ 
++/* the output the policy would pick for the mode in @vinfo, for the current source */
++int get_amdv_mode_for(const struct vinfo_s *vinfo)
++{
++	int mode = READ_ONCE(dolby_vision_mode);
++
++	/* userspace enables the engine only for a DV source or a forced output */
++	amdv_policy_process_for(NULL, &mode, cur_src_format_or(FORMAT_DOVI), vinfo);
++	return mode;
++}
++EXPORT_SYMBOL(get_amdv_mode_for);
++
+ bool is_amdv_enable(void)
+ {
+ 	return dolby_vision_enable;
+diff --git a/include/linux/amlogic/media/amdolbyvision/dolby_vision.h b/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
+index 6dad1d8fa..dc126e81a 100644
+--- a/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
++++ b/include/linux/amlogic/media/amdolbyvision/dolby_vision.h
+@@ -163,6 +163,7 @@ bool for_amdv_certification(void);
+ void set_amdv_mode(int mode);
+ int get_amdv_mode(void);
+ int get_amdv_target_mode(void);
++int get_amdv_mode_for(const struct vinfo_s *vinfo);
+ void amdv_set_toggle_flag(int flag);
+ int amdv_wait_metadata(struct vframe_s *vf, enum vd_path_e vd_path);
+ int amdv_pop_metadata(void);

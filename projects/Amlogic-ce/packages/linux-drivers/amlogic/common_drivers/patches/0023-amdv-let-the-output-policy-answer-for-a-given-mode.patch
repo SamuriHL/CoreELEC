@@ -1,0 +1,121 @@
+From 26856d57f748c8cedb27c311496bc0e1c8f88294 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sat, 7 Nov 2026 00:23:32 -0600
+Subject: [PATCH] amdv: let the output policy answer for a given mode
+
+The policy fetches the current vinfo itself and maps an unknown source
+to SDR, so it can only answer for the mode already set and a source
+already classified. The colour decide needs an answer for the mode
+being set, before the new stream's first frame.
+---
+ .../media/enhancement/amdolby_vision/amdv.c   | 39 ++++++++++++-------
+ 1 file changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index 3006d2e77..b20dba2f2 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -3759,17 +3759,20 @@ int get_amdv_src_format(enum vd_path_e vd_path)
+ }
+ EXPORT_SYMBOL(get_amdv_src_format);
+ 
+-static enum signal_format_enum get_cur_src_format(void)
++static enum signal_format_enum cur_src_format_or(enum signal_format_enum unknown)
+ {
+-	int cur_format = amdv_src_format;
++	int cur_format = READ_ONCE(amdv_src_format);
+ 	enum signal_format_enum ret = FORMAT_SDR;
+ 	int dv_id = pri_input; /*pri input as default*/
+ 
+ 	if (multi_dv_mode)
+-		cur_format = dv_inst[dv_id].amdv_src_format;
++		cur_format = READ_ONCE(dv_inst[dv_id].amdv_src_format);
+ 	else if (is_aml_hw5())
+ 		return top2_v_info.amdv_src_format;
+ 
++	if (!cur_format)
++		return unknown;
++
+ 	switch (cur_format) {
+ 	case 1: /* HDR10 */
+ 		ret = FORMAT_HDR10;
+@@ -3802,10 +3805,15 @@ static enum signal_format_enum get_cur_src_format(void)
+ 	return ret;
+ }
+ 
++static enum signal_format_enum get_cur_src_format(void)
++{
++	return cur_src_format_or(FORMAT_SDR);
++}
++
+ static int amdv_policy_process_v1(struct vframe_s *vf,
+-				int *mode, enum signal_format_enum src_format)
++				int *mode, enum signal_format_enum src_format,
++				const struct vinfo_s *vinfo)
+ {
+-	const struct vinfo_s *vinfo;
+ 	int mode_change = 0;
+ 	int h = 0;
+ 	int w = 0;
+@@ -3965,7 +3973,6 @@ static int amdv_policy_process_v1(struct vframe_s *vf,
+ 		}
+ 	}
+ 
+-	vinfo = get_current_vinfo();
+ 	if (src_format == FORMAT_MVC) {
+ 		if (dolby_vision_mode !=
+ 			AMDV_OUTPUT_MODE_BYPASS) {
+@@ -4331,9 +4338,9 @@ static int amdv_policy_process_v2_tv(int *mode,
+ }
+ 
+ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
+-				int *mode, enum signal_format_enum src_format)
++				int *mode, enum signal_format_enum src_format,
++				const struct vinfo_s *vinfo)
+ {
+-	const struct vinfo_s *vinfo;
+ 	int mode_change = 0;
+ 	int h = 0;
+ 	int w = 0;
+@@ -4369,7 +4376,6 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
+ 		}
+ 	}
+ 
+-	vinfo = get_current_vinfo();
+ 	if (src_format == FORMAT_MVC) {
+ 		if (dolby_vision_mode !=
+ 			AMDV_OUTPUT_MODE_BYPASS) {
+@@ -4799,8 +4805,9 @@ static int amdv_policy_process_v2_stb(struct vframe_s *vf,
+ 	return mode_change;
+ }
+ 
+-int amdv_policy_process(struct vframe_s *vf, int *mode,
+-			enum signal_format_enum src_format)
++static int amdv_policy_process_for(struct vframe_s *vf, int *mode,
++				   enum signal_format_enum src_format,
++				   const struct vinfo_s *vinfo)
+ {
+ 	int mode_change = 0;
+ 
+@@ -4817,13 +4824,19 @@ int amdv_policy_process(struct vframe_s *vf, int *mode,
+ 		if (is_aml_tvmode())
+ 			mode_change = amdv_policy_process_v2_tv(mode, src_format);
+ 		else
+-			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format);
++			mode_change = amdv_policy_process_v2_stb(vf, mode, src_format, vinfo);
+ 	} else {
+-		mode_change = amdv_policy_process_v1(vf, mode, src_format);
++		mode_change = amdv_policy_process_v1(vf, mode, src_format, vinfo);
+ 	}
+ 	return mode_change;
+ }
+ 
++int amdv_policy_process(struct vframe_s *vf, int *mode,
++			enum signal_format_enum src_format)
++{
++	return amdv_policy_process_for(vf, mode, src_format, get_current_vinfo());
++}
++
+ /* dv provider of each video layer*/
+ char dv_provider[2][32] = {"dvbldec", "dvbldec2"};
+ 
