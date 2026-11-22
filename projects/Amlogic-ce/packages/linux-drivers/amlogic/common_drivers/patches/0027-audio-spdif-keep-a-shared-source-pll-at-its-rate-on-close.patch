@@ -1,0 +1,27 @@
+From f43d50a818e13a34fabf6ed12e28cd421b6ae3dc Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 15:45:16 -0600
+Subject: [PATCH] audio: spdif: keep a shared source pll at its rate on close
+
+Closing a spdif output after a 44.1k stream sets hifi_pll back to the
+48k rate. When hifi_pll is also the 44.1k source of another output, a
+stream still playing there runs about 9% fast until its next setup.
+---
+ sound/soc/amlogic/auge/spdif.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/sound/soc/amlogic/auge/spdif.c b/sound/soc/amlogic/auge/spdif.c
+index 59ca233f4..c82d42d49 100644
+--- a/sound/soc/amlogic/auge/spdif.c
++++ b/sound/soc/amlogic/auge/spdif.c
+@@ -1319,6 +1319,10 @@ static void aml_dai_spdif_shutdown(struct snd_pcm_substream *substream,
+ 
+ 	if (!clk_name)
+ 		return;
++	/* a pll that serves both rate families keeps the rate in use */
++	if (!IS_ERR(p_spdif->clk_src_cd) &&
++	    clk_is_match(p_spdif->sysclk, p_spdif->clk_src_cd))
++		return;
+ 	if (p_spdif->standard_sysclk % 11025 == 0) {
+ 		if (!strcmp(__clk_get_name(clk_get_parent(p_spdif->clk_spdifout)),
+ 				__clk_get_name(p_spdif->sysclk))) {

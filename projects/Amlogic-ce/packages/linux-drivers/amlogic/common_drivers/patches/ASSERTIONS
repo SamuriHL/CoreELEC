@@ -175,3 +175,6 @@ sound/soc/amlogic/auge/tdm.c:runtime->delay = 0;:1
 # 0026: G12B HDMI TDM-C and both S/PDIF outputs take hifi_pll (pristine 0)
 arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi:CLKID_HIFI_PLL:6
 arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi:"clk_src_cd":3
+# 0027 (ce-canary f43d50a81, matthane): with 0026 one hifi_pll can serve both
+# rate families; an S/PDIF close must not retune it under a running stream
+sound/soc/amlogic/auge/spdif.c:clk_is_match(p_spdif->sysclk, p_spdif->clk_src_cd):1
