@@ -1,0 +1,24 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "amcsc: do not limit 8bit HDR output"
+
+This reverts common_drivers commit d9ec1b3b91822e03fdbeb09305aa0f63fbbb4c17
+(author: Portisch <hugo.portisch@yahoo.de>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/enhancement/amvecm/amcsc.c b/drivers/media/enhancement/amvecm/amcsc.c
+index f75f73a0b..e0963e519 100644
+--- a/drivers/media/enhancement/amvecm/amcsc.c
++++ b/drivers/media/enhancement/amvecm/amcsc.c
+@@ -87,7 +87,7 @@ static uint pre_gamut_conv_en;
+ signed int vd1_contrast_offset;
+ 
+ signed int saturation_offset;
+-bool limit_8bit_hdr10 = false;
++bool limit_8bit_hdr10 = true;
+ 
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+ static bool cur_hdmi_out_fmt;

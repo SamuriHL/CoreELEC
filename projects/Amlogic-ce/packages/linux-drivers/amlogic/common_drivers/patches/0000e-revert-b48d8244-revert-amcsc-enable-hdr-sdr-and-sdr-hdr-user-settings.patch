@@ -1,0 +1,157 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "Revert "amcsc: enable hdr->sdr and sdr->hdr user settings""
+
+This reverts common_drivers commit b48d8244d8567d57f39f3c12b5ca83de5f5c02d8
+(author: Portisch <hugo.portisch@yahoo.de>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/enhancement/amvecm/amcsc.c b/drivers/media/enhancement/amvecm/amcsc.c
+index e0963e519..a2afa09a0 100644
+--- a/drivers/media/enhancement/amvecm/amcsc.c
++++ b/drivers/media/enhancement/amvecm/amcsc.c
+@@ -694,7 +694,7 @@ void set_force_output(enum output_format_e output)
+ EXPORT_SYMBOL(set_force_output);
+ 
+ #ifndef CONFIG_AMLOGIC_ZAPPER_CUT
+-static uint hdr_mode = 2; /* 0: hdr->hdr, 1:hdr->sdr, 2:auto */
++uint hdr_mode; /* 0: hdr->hdr, 1:hdr->sdr, 2:auto */
+ module_param(hdr_mode, uint, 0664);
+ MODULE_PARM_DESC(hdr_mode, "\n set hdr_mode\n");
+ 
+@@ -740,7 +740,7 @@ static uint force_pure_hlg[VD_PATH_MAX];
+ module_param_array(force_pure_hlg, uint, &vd_path_max, 0664);
+ MODULE_PARM_DESC(force_pure_hlg, "\n current force_pure_hlg\n");
+ 
+-uint sdr_mode; /* 0: sdr->sdr, 1:sdr->hdr, 2:auto */
++uint sdr_mode; /* 0: sdr->sdr (auto), 1:sdr->hdr */
+ module_param(sdr_mode, uint, 0664);
+ MODULE_PARM_DESC(sdr_mode, "\n set sdr_mode\n");
+ 
+diff --git a/drivers/media/enhancement/amvecm/amcsc.h b/drivers/media/enhancement/amvecm/amcsc.h
+index 65207afa6..8263ea0f3 100644
+--- a/drivers/media/enhancement/amvecm/amcsc.h
++++ b/drivers/media/enhancement/amvecm/amcsc.h
+@@ -154,6 +154,7 @@ extern unsigned int vecm_latch_flag;
+ extern signed int vd1_contrast_offset;
+ extern signed int saturation_offset;
+ extern uint sdr_mode;
++extern uint hdr_mode;
+ extern uint hdr_flag;
+ extern int video_rgb_ogo_xvy_mtx_latch;
+ extern int video_rgb_ogo_xvy_mtx;
+diff --git a/drivers/media/enhancement/amvecm/amcsc_pip.c b/drivers/media/enhancement/amvecm/amcsc_pip.c
+index 61bc0919e..c50f3f263 100644
+--- a/drivers/media/enhancement/amvecm/amcsc_pip.c
++++ b/drivers/media/enhancement/amvecm/amcsc_pip.c
+@@ -317,6 +317,11 @@ void vd2_map_top1_policy_process(struct vinfo_s *vinfo,
+ 		vpp_index,
+ 		get_hdr_module_status(vd_path, vpp_index));
+ 
++	pr_csc(4, "am_vecm: is_amdv_enable()=%d, is_amdv_on()=%d, dv_policy=%d, dv_mode=%d, dv_format=%d, dv_hdr_policy=%d\n",
++		is_amdv_enable(), is_amdv_on(), dv_policy, dv_mode, dv_format, dv_hdr_policy);
++	pr_csc(4, "am_vecm: cur_hdr_policy=%d, vd_path=%d, vpp_index=%d, get_hdr_module_status(vd_path, vpp_index)=%d, source_format[vd_path]=%d, target_format[VD1_PATH]=%d, sink_hdr_support(vinfo)=%d, is_video_layer_on(VD2_PATH)=%d\n",
++		cur_hdr_policy, vd_path, vpp_index, get_hdr_module_status(vd_path, vpp_index), source_format[vd_path], target_format[VD1_PATH], sink_hdr_support(vinfo), is_video_layer_on(VD2_PATH));
++
+ 	if (get_hdr_module_status(vd_path, vpp_index) != HDR_MODULE_ON && cur_hdr_policy != 2) {
+ 		/* hdr module off or bypass */
+ 		sdr_process_mode[vd_path] = PROC_BYPASS;
+@@ -1267,30 +1272,40 @@ int hdr_policy_process(struct vinfo_s *vinfo,
+ 						target_format[vd_path] = BT709;
+ 					}
+ 				} else {
+-					/* sdr->sdr */
+-					sdr_process_mode[vd_path] = PROC_BYPASS;
+-					if (ai_color_enable)
+-						sdr_process_mode[vd_path] = PROC_SDR_AC_SDR;
+-					if (source_format[vd_path] == HDRTYPE_SDR2020 &&
+-						!output_mode)
+-						target_format[vd_path] = BT2020;
+-					else
+-						target_format[vd_path] = BT709;
++					/* force sdr->hdr */
++					if (sdr_mode == 1 && sink_hdr_support(vinfo)
++						& HDR_SUPPORT) {
++						/* sdr->hdr */
++						hdr_process_mode[vd_path] =
++							PROC_SDR_TO_HDR;
++						target_format[vd_path] =
++							BT2020_PQ;
++					} else {
++						/* sdr->sdr */
++						sdr_process_mode[vd_path] = PROC_BYPASS;
++						if (ai_color_enable)
++							sdr_process_mode[vd_path] = PROC_SDR_AC_SDR;
++						if (source_format[vd_path] == HDRTYPE_SDR2020 &&
++							!output_mode)
++							target_format[vd_path] = BT2020;
++						else
++							target_format[vd_path] = BT709;
++					}
+ 				}
+ 				break;
+ 			case HDRTYPE_HLG:
+ 				/* source HLG */
+-				if (is_video_layer_on(oth_path) &&
++				if (hdr_mode == 0 && is_video_layer_on(oth_path) &&
+ 				    (target_format[oth_path] == BT2020_PQ ||
+ 				     target_format[oth_path] == BT2020_PQ_DYNAMIC)) {
+ 					/* hlg->hdr */
+ 					hlg_process_mode[vd_path] = PROC_HLG_TO_HDR;
+ 					target_format[vd_path] = BT2020_PQ;
+-				} else if (sink_hdr_support(vinfo) & HLG_SUPPORT) {
++				} else if (hdr_mode == 0 && sink_hdr_support(vinfo) & HLG_SUPPORT) {
+ 					/* hlg->hlg */
+ 					hlg_process_mode[vd_path] = PROC_BYPASS;
+ 					target_format[vd_path] = BT2020_HLG;
+-				} else if ((sink_hdr_support(vinfo) & HDR_SUPPORT) &&
++				} else if ((hdr_mode == 0 && sink_hdr_support(vinfo) & HDR_SUPPORT) &&
+ 					   (hdr_flag & 0x10)) {
+ 					/* hlg->hdr */
+ 					hlg_process_mode[vd_path] = PROC_HLG_TO_HDR;
+@@ -1315,11 +1330,11 @@ int hdr_policy_process(struct vinfo_s *vinfo,
+ 				break;
+ 			case HDRTYPE_HDR10:
+ 				/* source HDR10 */
+-				if (sink_hdr_support(vinfo) & HDR_SUPPORT) {
++				if (hdr_mode == 0 && sink_hdr_support(vinfo) & HDR_SUPPORT) {
+ 					/* hdr bypass */
+ 					hdr_process_mode[vd_path] = PROC_BYPASS;
+ 					target_format[vd_path] = BT2020_PQ;
+-				} else if (sink_hdr_support(vinfo) & HLG_SUPPORT) {
++				} else if (hdr_mode == 0 && sink_hdr_support(vinfo) & HLG_SUPPORT) {
+ 					/* hdr->hlg */
+ 					hdr_process_mode[vd_path] = PROC_HDR_TO_HLG;
+ 					target_format[vd_path] = BT2020_HLG;
+@@ -1342,15 +1357,15 @@ int hdr_policy_process(struct vinfo_s *vinfo,
+ 				break;
+ 			case HDRTYPE_HDR10PLUS:
+ 				/* source HDR10+ */
+-				if (hdr10_plus_support && !is_video_layer_on(oth_path)) {
++				if (hdr_mode == 0 && hdr10_plus_support && !is_video_layer_on(oth_path)) {
+ 					/* hdr+ bypass */
+ 					hdr10_plus_process_mode[vd_path] = PROC_BYPASS;
+ 					target_format[vd_path] = BT2020_PQ_DYNAMIC;
+-				} else if (sink_hdr_support(vinfo) & HDR_SUPPORT) {
++				} else if (hdr_mode == 0 && sink_hdr_support(vinfo) & HDR_SUPPORT) {
+ 					/* hdr+->hdr */
+ 					hdr10_plus_process_mode[vd_path] = PROC_HDRP_TO_HDR;
+ 					target_format[vd_path] = BT2020_PQ;
+-				} else if (sink_hdr_support(vinfo) & HLG_SUPPORT) {
++				} else if (hdr_mode == 0 && sink_hdr_support(vinfo) & HLG_SUPPORT) {
+ 					/* hdr+->hlg */
+ 					hdr10_plus_process_mode[vd_path] = PROC_HDRP_TO_HLG;
+ 					target_format[vd_path] = BT2020_HLG;
+@@ -2243,6 +2258,9 @@ int hdr_policy_process(struct vinfo_s *vinfo,
+ 	}
+ 
+ out:
++	pr_csc(4, "am_vecm: sdr_process_mode[vd_path]=%d, hdr_process_mode[vd_path]=%d, hlg_process_mode[vd_path]=%d, hdr10_plus_process_mode[vd_path]=%d, target_format[vd_path]=%d\n",
++		sdr_process_mode[vd_path], hdr_process_mode[vd_path], hlg_process_mode[vd_path], hdr10_plus_process_mode[vd_path], target_format[vd_path]);
++
+ 	/* update change flags */
+ 	if (is_amdv_on() &&
+ 	    vd_path == VD1_PATH) {

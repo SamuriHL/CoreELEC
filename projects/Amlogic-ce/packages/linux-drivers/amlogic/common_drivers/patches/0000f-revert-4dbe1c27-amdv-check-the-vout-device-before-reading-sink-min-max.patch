@@ -1,0 +1,35 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "amdv: check the vout device before reading sink min/max"
+
+This reverts common_drivers commit 4dbe1c27ae176fde4c1cbef7506618fd7f62b976
+(author: matthane <matthan.evans@icloud.com>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index 3006d2e77..c14dba675 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -8899,8 +8899,7 @@ int amdv_parse_metadata_v1(struct vframe_s *vf,
+ 	}
+ 
+ 	if (dolby_vision_flags & FLAG_USE_SINK_MIN_MAX) {
+-		if (vinfo->vout_device && vinfo->vout_device->dv_info &&
+-		    vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
++		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+ 			} else if (vinfo->vout_device->dv_info->ver == 1) {
+@@ -10477,8 +10476,7 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 	last_dst_format = dst_format;
+ 
+ 	if (dolby_vision_flags & FLAG_USE_SINK_MIN_MAX) {
+-		if (vinfo->vout_device && vinfo->vout_device->dv_info &&
+-		    vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
++		if (vinfo->vout_device->dv_info->ieeeoui == 0x00d046) {
+ 			if (vinfo->vout_device->dv_info->ver == 0) {
+ 				/* need lookup PQ table ... */
+ 			} else if (vinfo->vout_device->dv_info->ver == 1) {

@@ -1,0 +1,33 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "Revert "hdmitx21: clear HDR info in drm_pkt""
+
+This reverts common_drivers commit f37c2d68445ad7bbb33081262275317f6e8b3d29
+(author: Portisch <hugo.portisch@yahoo.de>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/vout/hdmitx21/hdmi_tx_main.c b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+index 1ac91be5e..0caaabe35 100644
+--- a/drivers/media/vout/hdmitx21/hdmi_tx_main.c
++++ b/drivers/media/vout/hdmitx21/hdmi_tx_main.c
+@@ -46,6 +46,7 @@
+ #include <linux/amlogic/media/vrr/vrr.h>
+ #include <linux/amlogic/media/amvecm/amvecm.h>
+ 
++#include <../../enhancement/amvecm/amcsc.h>
+ #include "hdmi_tx_module.h"
+ #include "hdmi_tx_ext.h"
+ #include "hdmi_tx.h"
+@@ -982,7 +983,8 @@ static void hdmitx_set_drm_pkt(struct master_display_info_s *data)
+ 	if (hdev->hdr_transfer_feature == T_BT709 &&
+ 		hdev->hdr_color_feature == C_BT709) {
+ 		/* send zero drm only for HDR->SDR transition */
+-		if (hdmi_hdr_status == HDMI_HDR_SMPTE_2084 || hdmi_hdr_status == HDMI_HDR_HLG) {
++		if (hdmi_hdr_status == HDMI_HDR_SMPTE_2084 || hdmi_hdr_status == HDMI_HDR_HLG ||
++			sdr_mode == 0 || hdr_mode == 1) {
+ 			HDMITX_INFO("%s: HDR->SDR, hdmi_hdr_status=%d\n",
+ 				__func__, hdmi_hdr_status);
+ 			hdev->colormetry = 0;

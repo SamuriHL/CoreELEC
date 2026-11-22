@@ -141,3 +141,14 @@ drivers/media/enhancement/amdolby_vision/amdv.c:		if (vinfo->vout_device && vinf
 
 # --- 0022: colour attr chosen on RESERVED6 under any HDR policy ---
 drivers/drm/meson_hdmi.c:(get_amdv_policy() == AMDV_FORCE_OUTPUT_MODE) ||:1
+
+# --- 0000a-0000i: 9 upstream reverts so the pin can move to cc0e6659 ---------
+# (release update 2026-11-21). The pin is upstream's, but amdv/amcsc/meson_crtc/
+# hdmitx21 must stay byte-identical to f9af0b41 + our stack. The load-bearing
+# one is the default flag word: upstream 4b50c894 turned FLAG_USE_SINK_MIN_MAX
+# OFF, and 0006/0008/0011/0014/0015/0017 are written for it ON. Nothing pinned
+# the default before; a silent upstream flip would pass every other line here.
+drivers/media/enhancement/amdolby_vision/amdv.c:FLAG_FORCE_CVM | FLAG_USE_SINK_MIN_MAX;:1
+#   8646fbd1 revert: the DRM hdr_policy/force_output properties must stay out
+#   (partner of the xbmc HDR10 controls we reverted on 10-30, D4/D5).
+drivers/drm/meson_crtc.c:meson_crtc_init_hdr_policy_property:0

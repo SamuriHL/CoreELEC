@@ -1,0 +1,77 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "amcsc: bypass the OSD HDR module for SDR forced to HDR"
+
+This reverts common_drivers commit eeff4f8ba1f84be7c27acf156e8d717d6c5aa13f
+(author: matthane <matthan.evans@icloud.com>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/enhancement/amvecm/amcsc_pip.c b/drivers/media/enhancement/amvecm/amcsc_pip.c
+index 966a81dbd..61bc0919e 100644
+--- a/drivers/media/enhancement/amvecm/amcsc_pip.c
++++ b/drivers/media/enhancement/amvecm/amcsc_pip.c
+@@ -3073,9 +3073,18 @@ void video_post_process(struct vframe_s *vf,
+ 					hdr_proc(vf, VD2_HDR, SDR_HDR, vinfo, &m, vpp_index);
+ 				else if (vd_path == VD3_PATH)
+ 					hdr_proc(vf, VD3_HDR, SDR_HDR, vinfo, &m, vpp_index);
+-				hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-				hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-				hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				if (chip_cls_id == TV_CHIP) {
++					/*for tv chip need sd2hdr function*/
++					hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				} else {
++					pr_csc(12, "sbtm: OSD, PROC_SDR_TO_HDR.\n");
++					sbtm_convert_process(SBTM_OSD_PROC,  vinfo, &m, 11);
++					hdr_proc(vf, OSD1_HDR, SDR_HDR, vinfo, &m, vpp_index);
++					hdr_proc(vf, OSD2_HDR, SDR_HDR, vinfo, &m, vpp_index);
++					hdr_proc(vf, OSD3_HDR, SDR_HDR, vinfo, &m, vpp_index);
++				}
+ 			} else {
+ 				if (vd_path == VD1_PATH)
+ 					hdr_proc_multi_slices(vf, VD1_HDR, SDR_HDR,
+@@ -3084,9 +3093,16 @@ void video_post_process(struct vframe_s *vf,
+ 					hdr_proc(vf, VD2_HDR, SDR_HDR, vinfo, NULL, vpp_index);
+ 				else if (vd_path == VD3_PATH)
+ 					hdr_proc(vf, VD3_HDR, SDR_HDR, vinfo, NULL, vpp_index);
+-				hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-				hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-				hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				if (chip_cls_id == TV_CHIP) {
++					/*for tv chip need sd2hdr function*/
++					hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				} else {
++					hdr_proc(vf, OSD1_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD2_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++					hdr_proc(vf, OSD3_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++				}
+ 			}
+ 		} else if (sdr_process_mode[vd_path] == PROC_SDR_TO_HLG) {
+ 			if (vd_path == VD1_PATH)
+@@ -3253,9 +3269,16 @@ void video_post_process(struct vframe_s *vf,
+ 				hdr_proc(vf, VD2_HDR, SDR_HDR, vinfo, &m, vpp_index);
+ 			else if (vd_path == VD3_PATH)
+ 				hdr_proc(vf, VD3_HDR, SDR_HDR, vinfo, &m, vpp_index);
+-			hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-			hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
+-			hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++			if (chip_cls_id == TV_CHIP) {
++				/*for tv chip need sd2hdr function*/
++				hdr_proc(vf, OSD1_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				hdr_proc(vf, OSD2_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++				hdr_proc(vf, OSD3_HDR, HDR_BYPASS, vinfo, NULL, vpp_index);
++			} else {
++				hdr_proc(vf, OSD1_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++				hdr_proc(vf, OSD2_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++				hdr_proc(vf, OSD3_HDR, SDR_HDR, vinfo, NULL, vpp_index);
++			}
+ 		} else if (sdr_process_mode[vd_path] == PROC_SDR_TO_HLG) {
+ 			gamut_convert_process(vinfo, source_type,
+ 				vd_path, &m, 11, DEST_HDR10);

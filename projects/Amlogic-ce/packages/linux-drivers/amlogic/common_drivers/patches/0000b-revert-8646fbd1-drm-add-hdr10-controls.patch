@@ -1,0 +1,100 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "DRM: add HDR10 controls"
+
+This reverts common_drivers commit 8646fbd1a8b0c77d7f73bbbc77b0a660bda4b734
+(author: Portisch <hugo.portisch@yahoo.de>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/drm/meson_crtc.c b/drivers/drm/meson_crtc.c
+index af1bd8200..69447f671 100644
+--- a/drivers/drm/meson_crtc.c
++++ b/drivers/drm/meson_crtc.c
+@@ -355,12 +355,6 @@ static int meson_crtc_atomic_get_property(struct drm_crtc *crtc,
+ 	} else if (property == meson_crtc->dv_mode_property) {
+ 		*val = get_amdv_mode();
+ 		return 0;
+-	} else if (property == meson_crtc->hdr_policy_property) {
+-		*val = get_hdr_policy();
+-		return 0;
+-	} else if (property == meson_crtc->force_output_property) {
+-		*val = get_force_output();
+-		return 0;
+ 	} else if (property == meson_crtc->dv_policy_property) {
+ 		*val = get_amdv_policy();
+ 		return 0;
+@@ -426,12 +420,6 @@ static int meson_crtc_atomic_set_property(struct drm_crtc *crtc,
+ 	} else if (property == meson_crtc->dv_mode_property) {
+ 		set_amdv_mode(val);
+ 		return 0;
+-	} else if (property == meson_crtc->hdr_policy_property) {
+-		set_hdr_policy(val);
+-		return 0;
+-	} else if (property == meson_crtc->force_output_property) {
+-		set_force_output(val);
+-		return 0;
+ 	} else if (property == meson_crtc->dv_policy_property) {
+ 		set_amdv_policy(val);
+ 		return 0;
+@@ -1145,36 +1133,6 @@ static void meson_crtc_init_dv_mode_property(struct drm_device *drm_dev,
+ 	}
+ }
+ 
+-static void meson_crtc_init_hdr_policy_property(struct drm_device *drm_dev,
+-						  struct am_meson_crtc *amcrtc)
+-{
+-	struct drm_property *prop;
+-
+-	prop = drm_property_create_range(drm_dev, 0, "hdr_policy",
+-					0, 255);
+-	if (prop) {
+-		amcrtc->hdr_policy_property = prop;
+-		drm_object_attach_property(&amcrtc->base.base, prop, 0);
+-	} else {
+-		DRM_ERROR("Failed to hdr_policy property\n");
+-	}
+-}
+-
+-static void meson_crtc_init_force_output_property(struct drm_device *drm_dev,
+-						  struct am_meson_crtc *amcrtc)
+-{
+-	struct drm_property *prop;
+-
+-	prop = drm_property_create_range(drm_dev, 0, "force_output",
+-					0, 7);
+-	if (prop) {
+-		amcrtc->force_output_property = prop;
+-		drm_object_attach_property(&amcrtc->base.base, prop, 0);
+-	} else {
+-		DRM_ERROR("Failed to force_output property\n");
+-	}
+-}
+-
+ static void meson_crtc_init_dv_policy_property(struct drm_device *drm_dev,
+ 						  struct am_meson_crtc *amcrtc)
+ {
+@@ -1421,8 +1379,6 @@ struct am_meson_crtc *meson_crtc_bind(struct meson_drm *priv, int idx)
+ 	meson_crtc_init_dv_enable_property(priv->drm, amcrtc);
+ 	meson_crtc_init_brr_update_property(priv->drm, amcrtc);
+ 	meson_crtc_init_dv_mode_property(priv->drm, amcrtc);
+-	meson_crtc_init_hdr_policy_property(priv->drm, amcrtc);
+-	meson_crtc_init_force_output_property(priv->drm, amcrtc);
+ 	meson_crtc_init_dv_policy_property(priv->drm, amcrtc);
+ 	meson_crtc_init_dv_ll_policy_property(priv->drm, amcrtc);
+ 	meson_crtc_init_dv_status_property(priv->drm, amcrtc);
+diff --git a/drivers/drm/meson_crtc.h b/drivers/drm/meson_crtc.h
+index 31561898f..7f7e847a1 100644
+--- a/drivers/drm/meson_crtc.h
++++ b/drivers/drm/meson_crtc.h
+@@ -105,8 +105,6 @@ struct am_meson_crtc {
+ 	struct drm_property *dv_enable_property;
+ 	struct drm_property *brr_update_property;
+ 	struct drm_property *dv_mode_property;
+-	struct drm_property *hdr_policy_property;
+-	struct drm_property *force_output_property;
+ 	struct drm_property *dv_policy_property;
+ 	struct drm_property *dv_ll_policy_property;
+ 	struct drm_property *dv_status_property;

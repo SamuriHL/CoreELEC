@@ -1,0 +1,115 @@
+From: SamuriHL <samurihl@msn.com>
+Date: Sat, 21 Nov 2026 12:00:00 -0500
+Subject: [PATCH] Revert "amdv: keep PQ graphics unmapped when sink min/max is off"
+
+This reverts common_drivers commit 4b50c89487ed27828c2bc41ab117d61de0c0764e
+(author: matthane <matthan.evans@icloud.com>), so that the files our 0001-0022 patch
+stack edits stay byte-identical to f9af0b41 while the package pin moves
+to cc0e6659. Applied before 0001; the 9 reverts run newest first.
+See docs/release_update_survey_ce_20261121.md section 2.2.
+
+---
+diff --git a/drivers/media/enhancement/amdolby_vision/amdv.c b/drivers/media/enhancement/amdolby_vision/amdv.c
+index c14dba675..beae7b138 100644
+--- a/drivers/media/enhancement/amdolby_vision/amdv.c
++++ b/drivers/media/enhancement/amdolby_vision/amdv.c
+@@ -268,7 +268,7 @@ char cur_crc[32] = "invalid";
+ #define FLAG_FRAME_DELAY_MASK	0xf
+ #define FLAG_FRAME_DELAY_SHIFT	16
+ 
+-unsigned int dolby_vision_flags = FLAG_BYPASS_VPP | FLAG_FORCE_CVM;
++unsigned int dolby_vision_flags = FLAG_BYPASS_VPP | FLAG_FORCE_CVM | FLAG_USE_SINK_MIN_MAX;
+ module_param(dolby_vision_flags, uint, 0664);
+ MODULE_PARM_DESC(dolby_vision_flags, "\n dolby_vision_flags\n");
+ 
+@@ -397,8 +397,6 @@ module_param(amdv_graphic_min, uint, 0664);
+ MODULE_PARM_DESC(amdv_graphic_min, "\n amdv_graphic_min\n");
+ module_param(amdv_graphic_max, uint, 0664);
+ MODULE_PARM_DESC(amdv_graphic_max, "\n amdv_graphic_max\n");
+-#define DV_PQ_GRAPHIC_MIN	20000	/* 0.0001 nits */
+-#define DV_PQ_GRAPHIC_MAX	3	/* nits */
+ 
+ static unsigned int dv_HDR10_graphics_max = 300;
+ static unsigned int dv_graphic_blend_test;
+@@ -10375,32 +10373,6 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 	else
+ 		dst_format = FORMAT_SDR;
+ 
+-	/* cert: some graphic test also need video pri 5223,5243,5253,5263 */
+-	if (dolby_vision_flags & FLAG_CERTIFICATION) {
+-		if ((dolby_vision_flags & FLAG_PRIORITY_GRAPHIC))
+-			pri_mode = G_PRIORITY;
+-		else
+-			pri_mode = V_PRIORITY;
+-	} else {
+-		/*auto mode: check video/graphics priority on the fly */
+-		if (get_video_enabled(0)/* && is_graphics_output_off()*/)
+-			pri_mode = V_PRIORITY;
+-		else
+-			pri_mode = G_PRIORITY;
+-		/*user debug mode*/
+-		if (force_priority == 1)
+-			pri_mode = G_PRIORITY;
+-		else if (force_priority == 2)
+-			pri_mode = V_PRIORITY;
+-
+-		/*video priority only valid in sink-led,set to graphic pri when in other mode*/
+-		if (dst_format != FORMAT_DOVI ||
+-		    (dst_format == FORMAT_DOVI &&
+-		    (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 ||
+-		    (dolby_vision_flags & FLAG_FORCE_DV_LL))))
+-			pri_mode = G_PRIORITY;
+-	}
+-
+ 	/* STB core */
+ 	/* check target luminance */
+ 	graphic_min = amdv_graphic_min;
+@@ -10536,15 +10508,6 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 			       amdv_default_max,
+ 			       sizeof(amdv_target_max));
+ 		}
+-	} else if (pri_mode == V_PRIORITY && !amdv_graphic_max &&
+-		   !(dolby_vision_flags & FLAG_CERTIFICATION) &&
+-		   (graphic_fmt == FORMAT_HDR10 ||
+-		    graphic_fmt == FORMAT_HDR8)) {
+-		/* PQ graphics under video priority: a range inside every
+-		 * v1/v2 VSVDB target range, so they pass unmapped
+-		 */
+-		graphic_min = DV_PQ_GRAPHIC_MIN;
+-		graphic_max = DV_PQ_GRAPHIC_MAX;
+ 	}
+ 
+ 	if (is_osd_off[0] && !multi_dv_mode) {
+@@ -10686,6 +10649,32 @@ int amdv_parse_metadata_v2_stb(struct vframe_s *vf,
+ 		dv_inst[dv_id].video_height = h;
+ 	}
+ 
++	/* cert: some graphic test also need video pri 5223,5243,5253,5263 */
++	if (dolby_vision_flags & FLAG_CERTIFICATION) {
++		if ((dolby_vision_flags & FLAG_PRIORITY_GRAPHIC))
++			pri_mode = G_PRIORITY;
++		else
++			pri_mode = V_PRIORITY;
++	} else {
++		/*auto mode: check video/graphics priority on the fly */
++		if (get_video_enabled(0)/* && is_graphics_output_off()*/)
++			pri_mode = V_PRIORITY;
++		else
++			pri_mode = G_PRIORITY;
++		/*user debug mode*/
++		if (force_priority == 1)
++			pri_mode = G_PRIORITY;
++		else if (force_priority == 2)
++			pri_mode = V_PRIORITY;
++
++		/*video priority only valid in sink-led,set to graphic pri when in other mode*/
++		if (dst_format != FORMAT_DOVI ||
++		    (dst_format == FORMAT_DOVI &&
++		    (dolby_vision_ll_policy >= DOLBY_VISION_LL_YUV422 ||
++		    (dolby_vision_flags & FLAG_FORCE_DV_LL))))
++			pri_mode = G_PRIORITY;
++	}
++
+ 	if (dst_format == FORMAT_DOVI) {
+ 		cur_use_ll_flag = new_m_dovi_setting.use_ll_flag;
+ 		cur_ll_rgb_desired = new_m_dovi_setting.ll_rgb_desired;
