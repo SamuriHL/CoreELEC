@@ -1,0 +1,207 @@
+From 87022d4d2748f5a4ab839569d667eda9393f8479 Mon Sep 17 00:00:00 2001
+From: SamuriHL <samurihl@gmail.com>
+Date: Sun, 22 Nov 2026 11:39:27 -0500
+Subject: [PATCH] video: site 4:2:0 chroma by the stream's chroma location;
+ hdmitx20: co-sited 4:2:2
+
+Design: Silverbak.
+
+The VD1 vertical 4:2:0 -> 4:4:4 formatter always starts at phase 0xc
+with line-0 repeat, which is correct for chroma_sample_loc_type 0/1.
+Type 2/3 streams (UHD Blu-ray, most HDR10) carry chroma co-sited with the
+even luma lines, so stock output puts their chroma half a luma line low
+and blends every output line 75/25. 4:2:2 output keeps that to the panel.
+The player now writes the stream's chroma location to vfmt_chroma_loc and
+the formatter uses phase 0 without the line-0 repeat for types 2/3.
+Interlaced, MVC, 4:2:2/4:4:4 sources, DV TV-core mode and DV dual layer
+keep the stock phase. vfmt_chroma_siting: 0 stock, 1 G12B (default),
+2 any chip.
+
+The G12B VPU->HDMI bridge decimates 4:4:4 to 4:2:2 by averaging pixel
+pairs, half a pixel right of the co-sited position CTA-861 defines and,
+for bilinear-upsampled MIF video, 0.75 C0 + 0.25 C1 instead of C0.
+hdmitx_422_cosited takes the even pixel: 0 average, 1 G12B (default),
+2 any chip; writing it applies at once while the output is 4:2:2.
+---
+ drivers/media/video_sink/video_hw.c         | 84 +++++++++++++++++++++
+ drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c | 48 ++++++++++++
+ 2 files changed, 132 insertions(+)
+
+diff --git a/drivers/media/video_sink/video_hw.c b/drivers/media/video_sink/video_hw.c
+index a90294a..abbd96b 100644
+--- a/drivers/media/video_sink/video_hw.c
++++ b/drivers/media/video_sink/video_hw.c
+@@ -912,6 +912,82 @@ static u32 postblend_color;
+ u32 g_mosaic_mode;
+ MODULE_PARM_DESC(g_mosaic_mode, "\n g_mosaic_mode\n");
+ module_param(g_mosaic_mode, uint, 0664);
++
++/*
++ * Vertical chroma siting for the VD1 4:2:0 -> 4:4:4 formatter (design:
++ * Silverbak). Stock code always programs initial phase 0xc with line-0
++ * repeat, which is right for chroma_sample_loc_type 0/1 (chroma between
++ * luma lines 0 and 1) and puts type 2/3 chroma (co-sited with the even luma
++ * lines: UHD Blu-ray, most HDR10) half a luma line low, with every output
++ * line a 75/25 blend. 4:2:2 output keeps that vertical result to the panel.
++ *
++ * vfmt_chroma_loc: the stream's chroma location in FFmpeg AVChromaLocation
++ *   numbering (0 unspecified, 1 left, 2 center, 3 topleft, 4 top,
++ *   5 bottomleft, 6 bottom). The player writes it at decoder open and 0 at
++ *   close; 0/1/2/5/6 keep the stock phase.
++ * vfmt_chroma_siting: 0 = stock phase for every stream; 1 = follow
++ *   vfmt_chroma_loc on validated chips (G12B); 2 = follow it on any chip.
++ * vfmt_cosited_rpt: test switch, keep line-0 repeat with phase 0 for the
++ *   co-sited case (default off: phase 0 starts on chroma row 0).
++ * Interlaced, MVC, 4:2:2/4:4:4 sources, DV TV-core mode and DV dual-layer
++ * (an EL on VD2, whose formatter keeps the stock phase) are left as stock.
++ */
++static int vfmt_chroma_loc;
++static int vfmt_chroma_siting = 1;
++static int vfmt_cosited_rpt;
++
++static int vfmt_chroma_param_set(const char *val,
++				 const struct kernel_param *kp)
++{
++	int old = *(int *)kp->arg;
++	int ret = param_set_int(val, kp);
++
++	if (!ret && *(int *)kp->arg != old) {
++		/* reprogram the formatter on the next vsync */
++		vd_layer[0].property_changed = true;
++		vd_layer[1].property_changed = true;
++	}
++	return ret;
++}
++
++static const struct kernel_param_ops vfmt_chroma_param_ops = {
++	.set = vfmt_chroma_param_set,
++	.get = param_get_int,
++};
++
++module_param_cb(vfmt_chroma_loc, &vfmt_chroma_param_ops,
++		&vfmt_chroma_loc, 0664);
++MODULE_PARM_DESC(vfmt_chroma_loc, "\n stream chroma location (AVChromaLocation)\n");
++module_param_cb(vfmt_chroma_siting, &vfmt_chroma_param_ops,
++		&vfmt_chroma_siting, 0664);
++MODULE_PARM_DESC(vfmt_chroma_siting, "\n 0 stock, 1 follow chroma loc on g12b, 2 any chip\n");
++module_param_cb(vfmt_cosited_rpt, &vfmt_chroma_param_ops,
++		&vfmt_cosited_rpt, 0664);
++MODULE_PARM_DESC(vfmt_cosited_rpt, "\n test: line-0 repeat with co-sited phase\n");
++
++/* the DV enhancement-layer frame shown with the current VD1 frame (video.c) */
++extern struct vframe_s *cur_dispbuf2;
++
++/* VD1 4:2:0 vertical formatter: should chroma row k land on luma line 2k? */
++static bool vfmt_vert_cosited(u32 type)
++{
++	if (!vfmt_chroma_siting)
++		return false;
++	if (vfmt_chroma_siting == 1 && !is_meson_g12b_cpu())
++		return false;
++	/* AVCHROMA_LOC_TOPLEFT (type 2), AVCHROMA_LOC_TOP (type 3) */
++	if (vfmt_chroma_loc != 3 && vfmt_chroma_loc != 4)
++		return false;
++	if (type & (VIDTYPE_TYPEMASK | VIDTYPE_MVC | VIDTYPE_VIU_422 |
++		    VIDTYPE_VIU_444 | VIDTYPE_RGB_444))
++		return false;
++	if (is_dovi_tv_on())
++		return false;
++	if (cur_dispbuf2)
++		return false;
++	return true;
++}
++
+ u32 pic_axis[4][4];
+ /*********************************************************
+  * Utils APIs
+@@ -2348,6 +2424,9 @@ static void vd1_set_dcu(struct video_layer_s *layer,
+ 		if (is_dovi_tv_on())
+ 			r |= VFORMATTER_ALWAYS_RPT |
+ 				(0x0 << VFORMATTER_INIPHASE_BIT);
++		else if (vfmt_vert_cosited(type))
++			r |= (vfmt_cosited_rpt ? VFORMATTER_RPTLINE0_EN : 0) |
++				(0x0 << VFORMATTER_INIPHASE_BIT);
+ 		else
+ 			r |= VFORMATTER_RPTLINE0_EN |
+ 				(0xc << VFORMATTER_INIPHASE_BIT);
+@@ -2671,6 +2750,11 @@ static void vd1_set_dcu(struct video_layer_s *layer,
+ 			else
+ 				vini_phase =
+ 					(0xa << VFORMATTER_INIPHASE_BIT);
++		} else if (vfmt_vert_cosited(type)) {
++			/* chroma co-sited with the even luma lines */
++			vini_phase = (0x0 << VFORMATTER_INIPHASE_BIT);
++			if (!vfmt_cosited_rpt)
++				vrepeat = 0;
+ 		}
+ 		vformatter |= (vphase | vini_phase | vrepeat);
+ 
+diff --git a/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c b/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
+index 3d20234..946cb0c 100644
+--- a/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
++++ b/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
+@@ -123,6 +123,53 @@ static int hdmitx_set_audmode(struct hdmitx_hw_common *tx_hw,
+ static int hdmitx_setupirq(struct hdmitx_hw_common *tx_hw);
+ static void hdmitx_debug(struct hdmitx_hw_common *tx_hw, const char *buf);
+ static void hdmitx_uninit(struct hdmitx_hw_common *tx_hw);
++
++/*
++ * 4:4:4 -> 4:2:2 chroma decimation at the VPU->HDMI bridge (design:
++ * Silverbak). VPU_HDMI_FMT_CTRL[3:2] chroma_dnsmp: 0 = pixel 0, 1 = pixel 1,
++ * 2 = average. CTA-861 4:2:2 chroma is co-sited with the even pixel; the
++ * stock average sends (p0 + p1) / 2, half a pixel right of where the sink
++ * puts it, and for 4:2:0 video upsampled by the formatter that is
++ * 0.75 C0 + 0.25 C1 instead of C0.
++ *
++ * hdmitx_422_cosited: 0 = stock average; 1 = even pixel on validated chips
++ * (G12B); 2 = even pixel on any chip. Takes effect at once when written
++ * while the output is 4:2:2.
++ */
++static uint hdmitx_422_cosited = 1;
++
++static void hdmitx_apply_422_dnsmp(void)
++{
++	struct hdmitx_dev *hdev = get_hdmitx_device();
++	bool cosited;
++
++	if (!hdev || !global_tx_hw ||
++	    hdev->tx_comm.fmt_para.cs != HDMI_COLORSPACE_YUV422)
++		return;
++	cosited = hdmitx_422_cosited == 2 ||
++		(hdmitx_422_cosited == 1 &&
++		 global_tx_hw->chip_data->chip_type == MESON_CPU_ID_G12B);
++	hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, cosited ? 0 : 2, 2, 2);
++}
++
++static int hdmitx_422_cosited_set(const char *val,
++				  const struct kernel_param *kp)
++{
++	int ret = param_set_uint(val, kp);
++
++	if (!ret)
++		hdmitx_apply_422_dnsmp();
++	return ret;
++}
++
++static const struct kernel_param_ops hdmitx_422_cosited_ops = {
++	.set = hdmitx_422_cosited_set,
++	.get = param_get_uint,
++};
++
++module_param_cb(hdmitx_422_cosited, &hdmitx_422_cosited_ops,
++		&hdmitx_422_cosited, 0664);
++MODULE_PARM_DESC(hdmitx_422_cosited, "\n 4:2:2 chroma: 0 average, 1 even pixel on g12b, 2 any chip\n");
+ static int hdmitx_cntl(struct hdmitx_hw_common *hdmitx_hw_common,
+ 		unsigned int cmd, unsigned int argv);
+ static int hdmitx_cntl_ddc(struct hdmitx_hw_common *tx_hw,
+@@ -2273,6 +2320,7 @@ void hdmitx_set_enc_hw(struct hdmitx_dev *hdev)
+ 	if (para->cs == HDMI_COLORSPACE_YUV422) {
+ 		hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 1, 0, 2);
+ 		hd_set_reg_bits(P_VPU_HDMI_SETTING, 0, 4, 4);
++		hdmitx_apply_422_dnsmp();
+ 	}
+ 
+ 	switch (para->vic) {
+-- 
+2.43.0
+

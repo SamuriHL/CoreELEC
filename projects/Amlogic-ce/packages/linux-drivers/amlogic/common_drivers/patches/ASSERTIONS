@@ -178,3 +178,11 @@ arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi:"clk_src_cd":3
 # 0027 (ce-canary f43d50a81, matthane): with 0026 one hifi_pll can serve both
 # rate families; an S/PDIF close must not retune it under a running stream
 sound/soc/amlogic/auge/spdif.c:clk_is_match(p_spdif->sysclk, p_spdif->clk_src_cd):1
+
+# --- 0028: chroma siting by the stream's chroma location + co-sited 4:2:2 ---
+# (design: Silverbak) VD1 AFBC + MIF vertical formatter follow vfmt_chroma_loc;
+# hdmitx20 4:2:2 takes the even pixel instead of the pair average
+drivers/media/video_sink/video_hw.c:static bool vfmt_vert_cosited(u32 type):1
+drivers/media/video_sink/video_hw.c:else if (vfmt_vert_cosited(type)):2
+drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c:static void hdmitx_apply_422_dnsmp(void):1
+drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c:		hdmitx_apply_422_dnsmp();:2
