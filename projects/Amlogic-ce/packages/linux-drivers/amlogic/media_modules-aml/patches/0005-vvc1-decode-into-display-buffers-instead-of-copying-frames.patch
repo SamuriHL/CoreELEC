@@ -1,0 +1,305 @@
+From ddecd7ab5cc640751826472586e7de079d480222 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Thu, 12 Nov 2026 15:20:30 -0600
+Subject: [PATCH] vvc1: decode into display buffers instead of copying frames
+
+The ucode decodes into 4 slots, too few to leave frames with display.
+Progressive frames were therefore copied by the CPU into a second pool
+at vf_get, without cache maintenance and after the slot was released,
+so moving pictures showed stale blocks. Interlaced kept the 4 slots.
+---
+ drivers/frame_provider/decoder/vc1/vvc1.c | 133 ++++++++++------------
+ 1 file changed, 63 insertions(+), 70 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/vc1/vvc1.c b/drivers/frame_provider/decoder/vc1/vvc1.c
+index fa461e1c..6636cdd9 100644
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -99,9 +99,10 @@ static unsigned int canvas_index;
+ 
+ #define VF_POOL_SIZE		32
+ #define DECODE_BUFFER_NUM_MAX	4
+-#define COPY_DECODE_BUFFER_NUM_MAX 32
++/* every vframe, two anchors and the decode target */
++#define FRAME_BUFFER_NUM_MAX	(VF_POOL_SIZE + 3)
+ #define WORKSPACE_SIZE		(2 * SZ_1M)
+-#define MAX_BMMU_BUFFER_NUM	(DECODE_BUFFER_NUM_MAX + COPY_DECODE_BUFFER_NUM_MAX + 1)
++#define MAX_BMMU_BUFFER_NUM	(FRAME_BUFFER_NUM_MAX + 1)
+ #define VF_BUFFER_IDX(n)	(1 + n)
+ #define DCAC_BUFF_START_ADDR	0x01f00000
+ #define RP_WORKAROUND_SIZE  SZ_4K
+@@ -166,7 +167,7 @@ static bool is_reset;
+ static bool is_irq_cancel;
+ static struct work_struct set_clk_work;
+ static struct work_struct error_wd_work;
+-static struct canvas_config_s vc1_canvas_config[DECODE_BUFFER_NUM_MAX + COPY_DECODE_BUFFER_NUM_MAX][3];
++static struct canvas_config_s vc1_canvas_config[FRAME_BUFFER_NUM_MAX][3];
+ spinlock_t vc1_rp_lock;
+ 
+ #ifdef DEBUG_PTS
+@@ -233,10 +234,11 @@ struct pic_info_t {
+ 	u32 picture_type;
+ 	unsigned short decode_pic_count;
+ 	u32 repeat_cnt;
++	u32 slot;
+ };
+ 
+ struct vdec_vc1_hw_s {
+-	s32 vfbuf_use[DECODE_BUFFER_NUM_MAX + COPY_DECODE_BUFFER_NUM_MAX];
++	s32 vfbuf_use[FRAME_BUFFER_NUM_MAX];
+ 	unsigned char again_flag;
+ 	unsigned char recover_flag;
+ 	u32 frame_width;
+@@ -263,10 +265,11 @@ struct vdec_vc1_hw_s {
+ 
+ 	s32 refs[2];
+ 
+-	s32 ref_use[DECODE_BUFFER_NUM_MAX];
+-	s32 buf_use[DECODE_BUFFER_NUM_MAX];
++	s32 ref_use[FRAME_BUFFER_NUM_MAX];
++	s32 buf_use[FRAME_BUFFER_NUM_MAX];
+ 	u32 decoding_index;
+-	struct pic_info_t pics[DECODE_BUFFER_NUM_MAX];
++	struct pic_info_t pics[FRAME_BUFFER_NUM_MAX];
++	s32 slot_buf[DECODE_BUFFER_NUM_MAX];
+ 	u32 interlace_flag;
+ 	u32 new_type;
+ 	u32 canvas_mode;
+@@ -414,6 +417,15 @@ static void vc1_set_rp(void) {
+ 	spin_unlock_irqrestore(&vc1_rp_lock, flags);
+ }
+ 
++/* a ucode slot stays bound until its picture is output and no reference */
++static void vvc1_unbind_slot(struct vdec_vc1_hw_s *hw, int index)
++{
++	u32 slot = hw->pics[index].slot;
++
++	hw->slot_buf[slot] = -1;
++	WRITE_VREG(VC1_BUFFERIN, ~(1 << slot));
++}
++
+ static int vvc1_config_ref_buf(struct vdec_vc1_hw_s *hw)
+ {
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s: new_type %d\n", __func__, hw->new_type);
+@@ -463,6 +475,7 @@ static int update_reference(struct vdec_vc1_hw_s *hw,	int index)
+ 		index = hw->vf_buf_num_used;
+ 	} else {
+ 		hw->ref_use[hw->refs[0]]--; 	//old ref0 unused
++		vvc1_unbind_slot(hw, hw->refs[0]);
+ 		hw->refs[0] = hw->refs[1];
+ 		hw->refs[1] = index;
+ 		index = hw->refs[0];
+@@ -475,6 +488,10 @@ static int find_free_buffer(struct vdec_vc1_hw_s *hw)
+ {
+ 	int i;
+ 
++	/* an interlaced picture takes two vframes */
++	if (kfifo_len(&newframe_q) < 2)
++		return INVALID_IDX;
++
+ 	for (i = 0; i < hw->vf_buf_num_used; i++) {
+ 		vc1_print(0, VC1_DEBUG_DETAIL,"%s: i %d, vfbuf_use %d, ref_use %d, buf_use %d\n", __func__,
+ 			i, hw->vfbuf_use[i], hw->ref_use[i], hw->buf_use[i]);
+@@ -494,18 +511,34 @@ static int find_free_buffer(struct vdec_vc1_hw_s *hw)
+ 	return i;
+ }
+ 
++static int find_free_slot(struct vdec_vc1_hw_s *hw)
++{
++	int i;
++
++	for (i = 0; i < DECODE_BUFFER_NUM_MAX; i++) {
++		if (hw->slot_buf[i] == -1)
++			return i;
++	}
++
++	return INVALID_IDX;
++}
++
+ static int vvc1_config_buf(struct vdec_vc1_hw_s *hw)
+ {
+ 	u32 index = -1;
+ 	u32 canvas1_info = 0;
++	int slot;
+ 	index = find_free_buffer(hw);
+-	if (index == INVALID_IDX) {
++	slot = find_free_slot(hw);
++	if (index == INVALID_IDX || slot == INVALID_IDX) {
+ 		WRITE_VREG(CANVAS_BUF_REG, 0xff);
+ 		return -1;
+ 	}
+ 	hw->decoding_index = index;
+ 	hw->buf_use[hw->decoding_index]++;
+-	canvas1_info = (index2canvas(index) << 8) | index;
++	hw->slot_buf[slot] = index;
++	hw->pics[index].slot = slot;
++	canvas1_info = (index2canvas(index) << 8) | slot;
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s: decoding_index %d, buf_use %d, canvas1_info 0x%x\n",
+ 		__func__, index, hw->buf_use[hw->decoding_index], canvas1_info);
+ 	WRITE_VREG(CANVAS_BUF_REG, canvas1_info);
+@@ -612,7 +645,7 @@ static int prepare_display_buf(struct vdec_vc1_hw_s *hw,	struct pic_info_t *pic)
+ 		vf->type_original = vf->type;
+ 		set_aspect_ratio(vf, READ_VREG(VC1_PIC_RATIO));
+ 
+-		hw->vfbuf_use[buffer_index]++;
++		hw->vfbuf_use[buffer_index] += 2;
+ 		vf->mem_handle =
+ 			decoder_bmmu_box_get_mem_handle(
+ 				mm_blk_handle,
+@@ -697,7 +730,6 @@ static int prepare_display_buf(struct vdec_vc1_hw_s *hw,	struct pic_info_t *pic)
+ 		vf->type_original = vf->type;
+ 		set_aspect_ratio(vf, READ_VREG(VC1_PIC_RATIO));
+ 
+-		hw->vfbuf_use[buffer_index]++;
+ 		vf->mem_handle =
+ 			decoder_bmmu_box_get_mem_handle(
+ 				mm_blk_handle,
+@@ -971,7 +1003,7 @@ static irqreturn_t vvc1_isr_thread_handler(int irq, void *dev_id)
+ 		}
+ 
+ 		repeat_count = READ_VREG(VC1_REPEAT_COUNT);
+-		buffer_index = ((reg & 0x7) - 1) & 3;
++		buffer_index = hw->decoding_index;
+ 		is_bi_type = (reg >> 8) & 0x1;
+ 		if (is_bi_type)
+ 			picture_type = B_PICTURE + 1;//BI, should set as B_PICTURE
+@@ -1073,9 +1105,10 @@ static irqreturn_t vvc1_isr_thread_handler(int irq, void *dev_id)
+ 
+ 		if (hw->throw_pb_flag && picture_type != I_PICTURE) {
+ 				vc1_print(0, VC1_DEBUG_DETAIL, "%s: WRITE_VREG(VC1_BUFFERIN, 0x%x) decoding_index %d, for throwing picture with type of %d\n",
+-					__func__, ~(1 << hw->decoding_index), hw->decoding_index, picture_type);
++					__func__, ~(1 << hw->pics[hw->decoding_index].slot),
++					hw->decoding_index, picture_type);
+ 
+-				WRITE_VREG(VC1_BUFFERIN, ~(1 << hw->decoding_index));
++				vvc1_unbind_slot(hw, hw->decoding_index);
+ 				hw->buf_use[hw->decoding_index]--;
+ 				vc1_print(0, VC1_DEBUG_DETAIL,"%s: index %d, buf_use %d, buffer_index %d\n",
+ 					__func__, hw->decoding_index, hw->buf_use[hw->decoding_index], buffer_index);
+@@ -1087,11 +1120,11 @@ static irqreturn_t vvc1_isr_thread_handler(int irq, void *dev_id)
+ 					/* drop b frame before reference pic ready */
+ 					if (hw->refs[0] == -1) {
+ 						buffer_index = hw->vf_buf_num_used;
+-						WRITE_VREG(VC1_BUFFERIN, ~(1 << hw->decoding_index));
+ 						hw->buf_use[hw->decoding_index]--;
+ 						vc1_print(0, VC1_DEBUG_DETAIL,"%s: decoding_index %d, buf_use %d\n",
+ 							__func__, hw->decoding_index, hw->buf_use[hw->decoding_index]);
+ 					}
++					vvc1_unbind_slot(hw, hw->decoding_index);
+ 				}
+ 
+ 				if (buffer_index < hw->vf_buf_num_used) {
+@@ -1164,60 +1197,14 @@ static struct vframe_s *vvc1_vf_get(void *op_arg)
+ {
+ 	struct vframe_s *vf;
+ 
+-	if (kfifo_get(&display_q, &vf)) {
+-		struct vdec_vc1_hw_s *hw = &vc1_hw;
+-		if (!hw->interlace_flag) {
+-			u32 buffer_index, i;
+-
+-			for (i = 0; i < COPY_DECODE_BUFFER_NUM_MAX; i++) {
+-				buffer_index = i + DECODE_BUFFER_NUM_MAX;
+-				if (!hw->vfbuf_use[buffer_index]) {
+-					break;
+-				}
+-			}
+-
+-			if (i == COPY_DECODE_BUFFER_NUM_MAX) {
+-				pr_err("vc1: shouldn't happen, but couldn't find a free vbuf!\n");
+-				kfifo_put(&recycle_q, vf);
+-				return NULL;
+-			}
+-
+-			vc1_print(0, VC1_DEBUG_DETAIL,"%s: copy frame from index %d to %d\n",
+-				__func__, vf->index, buffer_index);
+-
+-			hw->vfbuf_use[buffer_index]++;
+-
+-			if (--hw->vfbuf_use[vf->index] == 0) {
+-				WRITE_VREG(VC1_BUFFERIN, ~(1 << vf->index));
+-				hw->buf_use[vf->index]--;
+-			}
+-
+-			memcpy(decoder_bmmu_box_get_virt_addr(mm_blk_handle, buffer_index),
+-			       decoder_bmmu_box_get_virt_addr(mm_blk_handle, vf->index),
+-			       decoder_bmmu_box_get_mem_size(mm_blk_handle, vf->index));
+-			vf->canvas0Addr = vf->canvas1Addr = index2canvas(buffer_index);
+-			if (is_support_vdec_canvas()) {
+-				vf->canvas0Addr = vf->canvas1Addr = -1;
+-				vf->canvas0_config[0] = vc1_canvas_config[buffer_index][0];
+-				vf->canvas0_config[1] = vc1_canvas_config[buffer_index][1];
+-			}
+-			vf->mem_handle = decoder_bmmu_box_get_mem_handle(mm_blk_handle, buffer_index);
+-			vf->index = buffer_index;
+-		}
+-
++	if (kfifo_get(&display_q, &vf))
+ 		return vf;
+-	}
+ 
+ 	return NULL;
+ }
+ 
+ static void vvc1_vf_put(struct vframe_s *vf, void *op_arg)
+ {
+-	if (vf->index >= DECODE_BUFFER_NUM_MAX)
+-	{
+-		struct vdec_vc1_hw_s *hw = &vc1_hw;
+-		hw->vfbuf_use[vf->index]--;
+-	}
+ 	kfifo_put(&recycle_q, (const struct vframe_s *)vf);
+ }
+ 
+@@ -1623,18 +1610,17 @@ static void vvc1_local_init(bool is_reset)
+ 		hw->refs[0] = -1;
+ 		hw->refs[1] = -1;
+ 		hw->throw_pb_flag = 1;
+-		hw->vf_buf_num_used = DECODE_BUFFER_NUM_MAX;
++		hw->vf_buf_num_used = FRAME_BUFFER_NUM_MAX;
+ 		hw->frame_width = 0;
+ 		hw->frame_height = 0;
+ 
+-		for (i = 0; i < hw->vf_buf_num_used + COPY_DECODE_BUFFER_NUM_MAX; i++) {
++		for (i = 0; i < hw->vf_buf_num_used; i++) {
+ 			hw->vfbuf_use[i] = 0;
+-			if (i < DECODE_BUFFER_NUM_MAX)
+-			{
+-				hw->buf_use[i] = 0;
+-				hw->ref_use[i] = 0;
+-			}
++			hw->buf_use[i] = 0;
++			hw->ref_use[i] = 0;
+ 		}
++		for (i = 0; i < DECODE_BUFFER_NUM_MAX; i++)
++			hw->slot_buf[i] = -1;
+ 
+ 		INIT_KFIFO(display_q);
+ 		INIT_KFIFO(recycle_q);
+@@ -1643,10 +1629,15 @@ static void vvc1_local_init(bool is_reset)
+ 			const struct vframe_s *vf;
+ 
+ 			vf = &vfpool[i];
+-			vfpool[i].index = DECODE_BUFFER_NUM_MAX;
++			vfpool[i].index = hw->vf_buf_num_used;
+ 
+ 			kfifo_put(&newframe_q, (const struct vframe_s *)vf);
+ 		}
++	} else if ((hw->slot_buf[hw->pics[hw->decoding_index].slot] ==
++		hw->decoding_index) && !hw->ref_use[hw->decoding_index]) {
++		/* release the target the stopped ucode was decoding */
++		hw->slot_buf[hw->pics[hw->decoding_index].slot] = -1;
++		hw->buf_use[hw->decoding_index]--;
+ 	}
+ 
+ 	if (mm_blk_handle) {
+@@ -1695,7 +1686,9 @@ static void error_do_work(struct work_struct *work)
+ {
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s \n", __func__);
+ 
++	is_irq_cancel = true;
+ 	amvdec_stop();
++	vdec_sync_irq(VDEC_IRQ_1);
+ 	msleep(20);
+ #ifdef CONFIG_AMLOGIC_POST_PROCESS_MANAGER
+ 	vvc1_ppmgr_reset();

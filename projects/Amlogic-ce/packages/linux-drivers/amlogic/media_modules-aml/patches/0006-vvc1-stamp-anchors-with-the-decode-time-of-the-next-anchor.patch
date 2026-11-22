@@ -1,0 +1,99 @@
+From 2ae732b038b074e81d4251fdee08c9fdcdbb2683 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 17 Nov 2026 11:33:43 -0600
+Subject: [PATCH] vvc1: stamp anchors with the decode time of the next anchor
+
+With decode-time stamps (KEYFRAME_PTS_ONLY), as from MKV VfW and AVI,
+each anchor kept its own decode time. It is shown after the B pictures
+that follow it, so stamps left display order. A skipped P is the next
+anchor too, but the ucode reports no picture for it.
+---
+ drivers/frame_provider/decoder/vc1/vvc1.c | 45 +++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/drivers/frame_provider/decoder/vc1/vvc1.c b/drivers/frame_provider/decoder/vc1/vvc1.c
+index 6636cdd9..29b228b0 100644
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -150,6 +150,7 @@ static u32 stat;
+ static u32 buf_size = 32 * 1024 * 1024;
+ static u32 buf_offset;
+ static u32 avi_flag;
++static u32 dts_stamps;
+ static u32 unstable_pts_debug;
+ static u32 unstable_pts;
+ static u32 vvc1_ratio;
+@@ -270,6 +271,10 @@ struct vdec_vc1_hw_s {
+ 	u32 decoding_index;
+ 	struct pic_info_t pics[FRAME_BUFFER_NUM_MAX];
+ 	s32 slot_buf[DECODE_BUFFER_NUM_MAX];
++	bool held_open;
++	bool held_skip;
++	u32 held_next;
++	u64 held_next64;
+ 	u32 interlace_flag;
+ 	u32 new_type;
+ 	u32 canvas_mode;
+@@ -478,8 +483,24 @@ static int update_reference(struct vdec_vc1_hw_s *hw,	int index)
+ 		vvc1_unbind_slot(hw, hw->refs[0]);
+ 		hw->refs[0] = hw->refs[1];
+ 		hw->refs[1] = index;
++		/* with decode stamps an anchor is shown at the next anchor's decode time */
++		if (dts_stamps && hw->held_skip) {
++			hw->pics[hw->refs[0]].pts = hw->held_next;
++			hw->pics[hw->refs[0]].pts64 = hw->held_next64;
++		} else if (dts_stamps && hw->pics[index].pts_valid) {
++			hw->pics[hw->refs[0]].pts = hw->pics[index].pts;
++			hw->pics[hw->refs[0]].pts64 = hw->pics[index].pts64;
++			hw->pics[hw->refs[0]].pts_valid = 1;
++		}
+ 		index = hw->refs[0];
+ 	}
++	if (dts_stamps) {
++		hw->held_skip = false;
++		hw->held_open = hw->pics[hw->refs[1]].pts_valid;
++		hw->held_next = hw->pics[hw->refs[1]].pts + DUR2PTS(vvc1_amstream_dec_info.rate);
++		hw->held_next64 = hw->pics[hw->refs[1]].pts64 +
++			div_u64((u64)DUR2PTS(vvc1_amstream_dec_info.rate) * 100, 9);
++	}
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s: hw->refs[0] = %d, hw->refs[1] = %d\n", __func__, hw->refs[0], hw->refs[1]);
+ 	return index;
+ }
+@@ -1103,6 +1124,26 @@ static irqreturn_t vvc1_isr_thread_handler(int irq, void *dev_id)
+ 		if (vvc1_amstream_dec_info.rate == 0)
+ 			vvc1_amstream_dec_info.rate = PTS2DUR(frm.rate);
+ 
++		/*
++		 * the ucode reports nothing for a skipped P, an anchor: it takes the
++		 * first decode tick after the held anchor that no B used
++		 */
++		if (dts_stamps && hw->held_open && hw->pics[hw->decoding_index].pts_valid) {
++			u32 tick = DUR2PTS(vvc1_amstream_dec_info.rate);
++			u32 cur = hw->pics[hw->decoding_index].pts;
++
++			if ((int)(cur - hw->held_next) > (int)(tick / 2)) {
++				hw->held_skip = true;
++				hw->held_open = false;
++			} else if (picture_type == I_PICTURE || picture_type == P_PICTURE) {
++				hw->held_open = false;
++			} else {
++				hw->held_next = cur + tick;
++				hw->held_next64 = hw->pics[hw->decoding_index].pts64 +
++					div_u64((u64)tick * 100, 9);
++			}
++		}
++
+ 		if (hw->throw_pb_flag && picture_type != I_PICTURE) {
+ 				vc1_print(0, VC1_DEBUG_DETAIL, "%s: WRITE_VREG(VC1_BUFFERIN, 0x%x) decoding_index %d, for throwing picture with type of %d\n",
+ 					__func__, ~(1 << hw->pics[hw->decoding_index].slot),
+@@ -1585,6 +1626,10 @@ static void vvc1_local_init(bool is_reset)
+ 	vvc1_ratio = (vvc1_amstream_dec_info.ratio >> DISP_RATIO_ASPECT_RATIO_BIT);
+ 
+ 	avi_flag = (unsigned long) vvc1_amstream_dec_info.param & 0x01;
++	/* the client sends decode times (KEYFRAME_PTS_ONLY) */
++	dts_stamps = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;
++	hw->held_open = false;
++	hw->held_skip = false;
+ 
+ 	unstable_pts = (((unsigned long) vvc1_amstream_dec_info.param & 0x40) >> 6);
+ 	if (unstable_pts_debug == 1) {

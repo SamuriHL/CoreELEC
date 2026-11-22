@@ -20,3 +20,11 @@ drivers/frame_provider/decoder/utils/vdec.c:					STBUF_READ(&vdec->vbuf, get_wp)
 drivers/frame_provider/decoder/h265/vh265.c:pic_display->fast_output_done = 1;:1
 drivers/frame_provider/decoder/h265/vh265.c:new_pic->fast_output_done = 0;:1
 drivers/frame_provider/decoder/h265/vh265.c:pic_display = fast_pic = pic;:1
+# 0005 (ce-canary ddecd7ab, matthane): VC-1 decodes into display buffers, no
+# CPU copy - the copy-buffer pool must be gone and the slot unbind present
+drivers/frame_provider/decoder/vc1/vvc1.c:static void vvc1_unbind_slot(struct vdec_vc1_hw_s *hw, int index):1
+drivers/frame_provider/decoder/vc1/vvc1.c:COPY_DECODE_BUFFER_NUM_MAX:0
+# 0006 (ce-canary 2ae732b0, matthane): anchors stamped with the next anchor's
+# decode time under KEYFRAME_PTS_ONLY; the switch and the tail of the hunk
+drivers/frame_provider/decoder/vc1/vvc1.c:dts_stamps = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;:1
+drivers/frame_provider/decoder/vc1/vvc1.c:hw->held_skip = true;:1
