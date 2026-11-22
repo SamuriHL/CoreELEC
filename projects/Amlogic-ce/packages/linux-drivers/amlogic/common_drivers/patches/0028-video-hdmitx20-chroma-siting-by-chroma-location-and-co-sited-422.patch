@@ -1,4 +1,4 @@
-From 87022d4d2748f5a4ab839569d667eda9393f8479 Mon Sep 17 00:00:00 2001
+From ad07518de415e3d513c44da7bd4e9604cd8ded81 Mon Sep 17 00:00:00 2001
 From: SamuriHL <samurihl@gmail.com>
 Date: Sun, 22 Nov 2026 11:39:27 -0500
 Subject: [PATCH] video: site 4:2:0 chroma by the stream's chroma location;
@@ -23,15 +23,15 @@ for bilinear-upsampled MIF video, 0.75 C0 + 0.25 C1 instead of C0.
 hdmitx_422_cosited takes the even pixel: 0 average, 1 G12B (default),
 2 any chip; writing it applies at once while the output is 4:2:2.
 ---
- drivers/media/video_sink/video_hw.c         | 84 +++++++++++++++++++++
- drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c | 48 ++++++++++++
- 2 files changed, 132 insertions(+)
+ drivers/media/video_sink/video_hw.c         | 86 +++++++++++++++++++++
+ drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c | 49 ++++++++++++
+ 2 files changed, 135 insertions(+)
 
 diff --git a/drivers/media/video_sink/video_hw.c b/drivers/media/video_sink/video_hw.c
-index a90294a..abbd96b 100644
+index a90294a..6993a0f 100644
 --- a/drivers/media/video_sink/video_hw.c
 +++ b/drivers/media/video_sink/video_hw.c
-@@ -912,6 +912,82 @@ static u32 postblend_color;
+@@ -912,6 +912,84 @@ static u32 postblend_color;
  u32 g_mosaic_mode;
  MODULE_PARM_DESC(g_mosaic_mode, "\n g_mosaic_mode\n");
  module_param(g_mosaic_mode, uint, 0664);
@@ -46,14 +46,16 @@ index a90294a..abbd96b 100644
 + *
 + * vfmt_chroma_loc: the stream's chroma location in FFmpeg AVChromaLocation
 + *   numbering (0 unspecified, 1 left, 2 center, 3 topleft, 4 top,
-+ *   5 bottomleft, 6 bottom). The player writes it at decoder open and 0 at
-+ *   close; 0/1/2/5/6 keep the stock phase.
++ *   5 bottomleft, 6 bottom). The player writes it at every decoder open
++ *   (never at close, so it outlives a stop); 0/1/2/5/6 keep the stock phase.
 + * vfmt_chroma_siting: 0 = stock phase for every stream; 1 = follow
 + *   vfmt_chroma_loc on validated chips (G12B); 2 = follow it on any chip.
 + * vfmt_cosited_rpt: test switch, keep line-0 repeat with phase 0 for the
 + *   co-sited case (default off: phase 0 starts on chroma row 0).
-+ * Interlaced, MVC, 4:2:2/4:4:4 sources, DV TV-core mode and DV dual-layer
-+ * (an EL on VD2, whose formatter keeps the stock phase) are left as stock.
++ * Interlaced, MVC, 4:2:2/4:4:4 sources, DV on TV SoCs (is_dovi_tv_on) and
++ * DV dual-layer (an EL on VD2, whose formatter keeps the stock phase) are
++ * left as stock. Single-layer DV on G12B (player-led, LLDV or TV-led) is
++ * sited like any other HEVC base layer.
 + */
 +static int vfmt_chroma_loc;
 +static int vfmt_chroma_siting = 1;
@@ -114,7 +116,7 @@ index a90294a..abbd96b 100644
  u32 pic_axis[4][4];
  /*********************************************************
   * Utils APIs
-@@ -2348,6 +2424,9 @@ static void vd1_set_dcu(struct video_layer_s *layer,
+@@ -2348,6 +2426,9 @@ static void vd1_set_dcu(struct video_layer_s *layer,
  		if (is_dovi_tv_on())
  			r |= VFORMATTER_ALWAYS_RPT |
  				(0x0 << VFORMATTER_INIPHASE_BIT);
@@ -124,7 +126,7 @@ index a90294a..abbd96b 100644
  		else
  			r |= VFORMATTER_RPTLINE0_EN |
  				(0xc << VFORMATTER_INIPHASE_BIT);
-@@ -2671,6 +2750,11 @@ static void vd1_set_dcu(struct video_layer_s *layer,
+@@ -2671,6 +2752,11 @@ static void vd1_set_dcu(struct video_layer_s *layer,
  			else
  				vini_phase =
  					(0xa << VFORMATTER_INIPHASE_BIT);
@@ -137,7 +139,7 @@ index a90294a..abbd96b 100644
  		vformatter |= (vphase | vini_phase | vrepeat);
  
 diff --git a/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c b/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
-index 3d20234..946cb0c 100644
+index 3d20234..93ba792 100644
 --- a/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
 +++ b/drivers/media/vout/hdmitx20/hw/hdmi_tx_hw.c
 @@ -123,6 +123,53 @@ static int hdmitx_set_audmode(struct hdmitx_hw_common *tx_hw,
@@ -154,18 +156,18 @@ index 3d20234..946cb0c 100644
 + * 0.75 C0 + 0.25 C1 instead of C0.
 + *
 + * hdmitx_422_cosited: 0 = stock average; 1 = even pixel on validated chips
-+ * (G12B); 2 = even pixel on any chip. Takes effect at once when written
-+ * while the output is 4:2:2.
++ * (G12B); 2 = even pixel on any chip. Applied wherever the bridge is set to
++ * convert to 4:2:2 (mode set, and the HDR CSC switch from 444/RGB to
++ * Y422 12-bit, which leaves fmt_para.cs unchanged), and at once when written.
 + */
 +static uint hdmitx_422_cosited = 1;
 +
 +static void hdmitx_apply_422_dnsmp(void)
 +{
-+	struct hdmitx_dev *hdev = get_hdmitx_device();
 +	bool cosited;
 +
-+	if (!hdev || !global_tx_hw ||
-+	    hdev->tx_comm.fmt_para.cs != HDMI_COLORSPACE_YUV422)
++	/* only while [1:0] hdmi_vid_fmt = 1, convert to 4:2:2 */
++	if (!global_tx_hw || (hd_read_reg(P_VPU_HDMI_FMT_CTRL) & 0x3) != 1)
 +		return;
 +	cosited = hdmitx_422_cosited == 2 ||
 +		(hdmitx_422_cosited == 1 &&
@@ -202,6 +204,14 @@ index 3d20234..946cb0c 100644
  	}
  
  	switch (para->vic) {
+@@ -6923,6 +6971,7 @@ void hdmitx20_color_convert(u32 output_color_format)
+ 
+ 		/* 2.1 encp no conversion HDMI format */
+ 		hd_set_reg_bits(P_VPU_HDMI_FMT_CTRL, 1, 0, 2);
++		hdmitx_apply_422_dnsmp();
+ 		/* 2.2 dithering control */
+ 		hdmitx_dith_ctrl(hdev);
+ 
 -- 
 2.43.0
 
