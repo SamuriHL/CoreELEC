@@ -1,0 +1,17 @@
+# Content assertions for the top-level ffmpeg patch stack, checked by
+#   projects/Amlogic-ce/tools/check-patches.py apply --assertions <this file>
+# Apply order (scripts/unpack, Amlogic-ce: PKG_PATCH_DIRS="postproc libreelec"):
+#   patches/*.patch sorted, then postproc/*.patch, then libreelec/*.patch.
+# Format: <path relative to the source root>:<literal string>:<exact count>
+# See common_drivers/patches/ASSERTIONS for why this file exists.
+#
+# NOTE: buildkodi(-rel).sh does not run this stack's pre-flight yet; run it by
+# hand (see docs/release_update_ce_ledger_20261121.md for the command).
+
+# --- 0004: HEVC stream parameters without a frame decode -----------------------
+# (FFmpeg master, Michael Niedermayer, backported by matthane: ce-canary 8cf790c989)
+libavcodec/hevc/hevcdec.c:static int export_stream_params_from_slice(HEVCContext *s, const H2645NAL *nal):1
+libavcodec/hevc/hevcdec.c:params_exported = export_stream_params_from_slice(s, nal);:1
+# pristine 2 + this patch 1; and the codec capability that makes avformat use it
+libavcodec/hevc/hevcdec.c:ret = export_stream_params_from_sei(s);:3
+libavcodec/hevc/hevcdec.c:FF_CODEC_CAP_SKIP_FRAME_FILL_PARAM:1

@@ -1,0 +1,114 @@
+From 7ac9cb4340fad075d5285fd1477eca3fffd72855 Mon Sep 17 00:00:00 2001
+From: Michael Niedermayer <michael@niedermayer.cc>
+Date: Tue, 1 Sep 2026 15:11:10 +0200
+Subject: [PATCH] avcodec/hevc: fill the stream parameters when all frames are
+ skipped
+
+With skip_frame at AVDISCARD_ALL the parameter set and SEI NAL units
+are still decoded, and as long as no decoded frame has configured the
+decoder, the parameters of the SPS activated by the first slice are
+exported.  Declaring FF_CODEC_CAP_SKIP_FRAME_FILL_PARAM on top of that
+lets avformat_find_stream_info() fill the stream parameters without
+decoding any frame.
+
+Upstream timings (master vs skipframe): loewe.ts (hevc/TS) 17.2 vs
+4.8, DELTAQP_A_BRCM_4.bit 21.7 vs 10.6, hevc/paramchange 59.8 vs 4.3.
+
+Backported from FFmpeg master to 9.0.2.
+---
+diff --git a/libavcodec/hevc/hevcdec.c b/libavcodec/hevc/hevcdec.c
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3687,10 +3687,47 @@
+     s->sei.recovery_point.has_recovery_poc = 0;
+ }
+ 
++static int export_stream_params_from_slice(HEVCContext *s, const H2645NAL *nal)
++{
++    GetBitContext gb = nal->gb;
++    const HEVCSPS *sps;
++    const HEVCVPS *vps;
++    unsigned pps_id;
++
++    int is_slice = nal->type <= HEVC_NAL_RASL_R ||
++                   (nal->type >= HEVC_NAL_BLA_W_LP &&
++                    nal->type <= HEVC_NAL_CRA_NUT);
++
++    if (!is_slice || nal->nuh_layer_id)
++        return 0;
++
++    skip_bits1(&gb); // first_slice_segment_in_pic_flag
++    if (nal->type >= HEVC_NAL_BLA_W_LP)
++        skip_bits1(&gb); // no_output_of_prior_pics_flag
++    pps_id = get_ue_golomb_long(&gb);
++    if (pps_id >= HEVC_MAX_PPS_COUNT || !s->ps.pps_list[pps_id])
++        return 0;
++    sps = s->ps.pps_list[pps_id]->sps;
++    vps = sps->vps;
++
++    export_stream_params(s, sps);
++
++    if (vps->nb_layers == 2 && vps->layer_id_in_nuh[1] &&
++        vps->scalability_mask_flag & HEVC_SCALABILITY_AUXILIARY) {
++        enum AVPixelFormat alpha_fmt = map_to_alpha_format(s, sps->pix_fmt);
++
++        if (alpha_fmt != AV_PIX_FMT_NONE)
++            s->avctx->pix_fmt = alpha_fmt;
++    }
++
++    return 1;
++}
++
+ static int decode_nal_units(HEVCContext *s, const uint8_t *buf, int length)
+ {
+     int ret = 0;
+     int eos_at_start = 1;
++    int params_exported = 0;
+     int flags = (H2645_FLAG_IS_NALFF * !!s->is_nalff) | H2645_FLAG_SMALL_PADDING;
+ 
+     s->cur_frame = s->collocated_ref = NULL;
+@@ -3772,8 +3809,21 @@
+     for (int i = 0; i < s->pkt.nb_nals; i++) {
+         H2645NAL *nal = &s->pkt.nals[i];
+ 
+-        if (s->avctx->skip_frame >= AVDISCARD_ALL ||
+-            (s->avctx->skip_frame >= AVDISCARD_NONREF && ff_hevc_nal_is_nonref(nal->type)))
++        if (s->avctx->skip_frame >= AVDISCARD_ALL) {
++            switch (nal->type) {
++            case HEVC_NAL_VPS:
++            case HEVC_NAL_SPS:
++            case HEVC_NAL_PPS:
++            case HEVC_NAL_SEI_PREFIX:
++            case HEVC_NAL_SEI_SUFFIX:
++                break;
++            default:
++                if (!s->layers[0].sps && !params_exported)
++                    params_exported = export_stream_params_from_slice(s, nal);
++                continue;
++            }
++        } else if (s->avctx->skip_frame >= AVDISCARD_NONREF &&
++                   ff_hevc_nal_is_nonref(nal->type))
+             continue;
+ 
+         ret = decode_nal_unit(s, i);
+@@ -3784,6 +3834,12 @@
+         }
+     }
+ 
++    if (params_exported) {
++        ret = export_stream_params_from_sei(s);
++        if (ret < 0)
++            goto fail;
++    }
++
+ fail:
+     for (int i = 0; i < FF_ARRAY_ELEMS(s->layers); i++) {
+         HEVCLayerContext *l = &s->layers[i];
+@@ -4254,6 +4310,7 @@
+     .p.capabilities        = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
+                              AV_CODEC_CAP_SLICE_THREADS | AV_CODEC_CAP_FRAME_THREADS,
+     .caps_internal         = FF_CODEC_CAP_EXPORTS_CROPPING |
++                             FF_CODEC_CAP_SKIP_FRAME_FILL_PARAM |
+                              FF_CODEC_CAP_USES_PROGRESSFRAMES |
+                              FF_CODEC_CAP_INIT_CLEANUP,
+     .p.profiles            = NULL_IF_CONFIG_SMALL(ff_hevc_profiles),
