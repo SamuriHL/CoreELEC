@@ -161,3 +161,17 @@ drivers/media/enhancement/amdolby_vision/amdv.c:static int amdv_policy_process_f
 drivers/drm/meson_hdmi.c:static bool is_amdv_output_dv(const struct drm_display_mode *drm_mode):1
 drivers/drm/meson_hdmi.c:mode = get_amdv_mode_for(&next);:1
 include/linux/amlogic/media/amdolbyvision/dolby_vision.h:get_amdv_mode_for(:1
+
+# --- 0025/0026: G12B audio clock on hifi_pll + FRDDR fill as ALSA delay -------
+# (ce-canary 478e5b015 + 95e9772a7, matthane; user ruling 2026-11-21 C9)
+# 0025: every playback pointer reports the FIFO fill as runtime->delay
+sound/soc/amlogic/auge/ddr_mngr.c:aml_frddr_get_position_fill(:1
+sound/soc/amlogic/auge/tdm.c:aml_frddr_get_position_fill(:1
+sound/soc/amlogic/auge/spdif.c:aml_frddr_get_position_fill(:1
+sound/soc/amlogic/auge/extn.c:aml_frddr_get_position_fill(:1
+sound/soc/amlogic/auge/earc.c:aml_frddr_get_position_fill(:1
+#   tail of the tdm.c hunk that was regenerated (context moved by our 0010)
+sound/soc/amlogic/auge/tdm.c:runtime->delay = 0;:1
+# 0026: G12B HDMI TDM-C and both S/PDIF outputs take hifi_pll (pristine 0)
+arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi:CLKID_HIFI_PLL:6
+arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi:"clk_src_cd":3

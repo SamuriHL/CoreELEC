@@ -1,0 +1,204 @@
+From 478e5b01527912fc1ea98553e8267cbde704f116 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 14:42:40 -0600
+Subject: [PATCH] audio: report the FRDDR FIFO fill as playback delay
+
+The playback pointer reads the FRDDR fetch address, which runs up to
+one FIFO depth (1 KiB) ahead of what the serializer has sent. ALSA's
+delay leaves that queue out, so the HDMI output trails the reported
+delay by 0.25 to 4 ms per format and moves in 512-byte refill steps.
+
+[samurihl: ce-canary common_drivers 478e5b015. Regenerated against
+ cc0e6659 + our stack: the tdm.c trigger-stop hunk needed fuzz 2 because
+ our 0010 rewrote the context after aml_frddr_enable(); content unchanged.]
+---
+ sound/soc/amlogic/auge/ddr_mngr.c | 29 +++++++++++++++++++++++++++++
+ sound/soc/amlogic/auge/ddr_mngr.h |  3 ++-
+ sound/soc/amlogic/auge/earc.c     |  6 ++++--
+ sound/soc/amlogic/auge/extn.c     | 11 +++++++----
+ sound/soc/amlogic/auge/spdif.c    | 11 +++++++----
+ sound/soc/amlogic/auge/tdm.c      | 11 +++++++----
+ 6 files changed, 56 insertions(+), 15 deletions(-)
+
+diff --git a/sound/soc/amlogic/auge/ddr_mngr.c b/sound/soc/amlogic/auge/ddr_mngr.c
+--- a/sound/soc/amlogic/auge/ddr_mngr.c
++++ b/sound/soc/amlogic/auge/ddr_mngr.c
+@@ -1537,6 +1537,35 @@
+ 	return aml_audiobus_read(actrl, reg);
+ }
+ 
++static unsigned int aml_frddr_get_fifo_bytes(struct frddr *fr)
++{
++	struct aml_audio_controller *actrl = fr->actrl;
++	unsigned int reg_base = fr->reg_base;
++	unsigned int reg;
++
++	reg = calc_frddr_address(EE_AUDIO_FRDDR_A_STATUS1, reg_base);
++	return ((aml_audiobus_read(actrl, reg) & FRDDR_FIFO_CNT) >> 8) * FIFO_BURST;
++}
++
++/*
++ * A refill moves the position and the fifo fill together. The link is
++ * nonatomic, so a refill can land between the reads: read until the
++ * position holds across the fill read.
++ */
++unsigned int aml_frddr_get_position_fill(struct frddr *fr, unsigned int *fill)
++{
++	unsigned int pos, last;
++
++	pos = aml_frddr_get_position(fr);
++	do {
++		last = pos;
++		*fill = aml_frddr_get_fifo_bytes(fr);
++		pos = aml_frddr_get_position(fr);
++	} while (pos != last);
++
++	return pos;
++}
++
+ static bool aml_frddr_burst_finished(struct frddr *fr)
+ {
+ 	struct aml_audio_controller *actrl = fr->actrl;
+diff --git a/sound/soc/amlogic/auge/ddr_mngr.h b/sound/soc/amlogic/auge/ddr_mngr.h
+--- a/sound/soc/amlogic/auge/ddr_mngr.h
++++ b/sound/soc/amlogic/auge/ddr_mngr.h
+@@ -20,7 +20,7 @@
+ #define MEMIF_INT_MASK              GENMASK(7, 0)
+ 
+ #define TODDR_FIFO_CNT              GENMASK(19, 8)
+-#define FRDDR_FIFO_CNT              GENMASK(17, 8)
++#define FRDDR_FIFO_CNT              GENMASK(16, 8)
+ 
+ #define FIFO_BURST                  8
+ #define FIFO_DEPTH_32K              0x8000
+@@ -337,6 +337,7 @@
+ 			unsigned int end);
+ int aml_frddr_set_intrpt(struct frddr *fr, unsigned int intrpt);
+ unsigned int aml_frddr_get_position(struct frddr *fr);
++unsigned int aml_frddr_get_position_fill(struct frddr *fr, unsigned int *fill);
+ void aml_frddr_enable(struct frddr *fr, bool enable);
+ void aml_frddr_select_dst(struct frddr *fr, enum frddr_dest);
+ void aml_frddr_select_dst_ss(struct frddr *fr,
+diff --git a/sound/soc/amlogic/auge/earc.c b/sound/soc/amlogic/auge/earc.c
+--- a/sound/soc/amlogic/auge/earc.c
++++ b/sound/soc/amlogic/auge/earc.c
+@@ -1197,12 +1197,13 @@
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct earc *p_earc = runtime->private_data;
+-	unsigned int addr, start_addr;
++	unsigned int addr, start_addr, fill;
+ 	snd_pcm_uframes_t frames;
+ 
+ 	start_addr = runtime->dma_addr;
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+-		addr = aml_frddr_get_position(p_earc->fddr);
++		addr = aml_frddr_get_position_fill(p_earc->fddr, &fill);
++		runtime->delay = bytes_to_frames(runtime, fill);
+ 	} else {
+ 		addr = aml_toddr_get_position(p_earc->tddr);
+ 		p_earc->rx_pointer = 1;
+@@ -1626,6 +1627,7 @@
+ 					      p_earc->chipinfo->rterm_on);
+ 			}
+ 			aml_frddr_enable(p_earc->fddr, false);
++			substream->runtime->delay = 0;
+ 			p_earc->tx_stream_state = SNDRV_PCM_STATE_DISCONNECTED;
+ 		} else {
+ 			p_earc->rx_cs_ready = false;
+diff --git a/sound/soc/amlogic/auge/extn.c b/sound/soc/amlogic/auge/extn.c
+--- a/sound/soc/amlogic/auge/extn.c
++++ b/sound/soc/amlogic/auge/extn.c
+@@ -386,14 +386,16 @@
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct extn *p_extn = runtime->private_data;
+-	unsigned int addr, start_addr;
++	unsigned int addr, start_addr, fill;
+ 	snd_pcm_uframes_t frames;
+ 
+ 	start_addr = runtime->dma_addr;
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+-		addr = aml_frddr_get_position(p_extn->fddr);
+-	else
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		addr = aml_frddr_get_position_fill(p_extn->fddr, &fill);
++		runtime->delay = bytes_to_frames(runtime, fill);
++	} else {
+ 		addr = aml_toddr_get_position(p_extn->tddr);
++	}
+ 
+ 	frames = bytes_to_frames(runtime, addr - start_addr);
+ 	if (frames > runtime->buffer_size)
+@@ -662,6 +664,7 @@
+ 			dev_info(substream->pcm->card->dev, "External Playback disable\n");
+ 
+ 			aml_frddr_enable(p_extn->fddr, false);
++			substream->runtime->delay = 0;
+ 		} else {
+ 			bool toddr_stopped = false;
+ 
+diff --git a/sound/soc/amlogic/auge/spdif.c b/sound/soc/amlogic/auge/spdif.c
+--- a/sound/soc/amlogic/auge/spdif.c
++++ b/sound/soc/amlogic/auge/spdif.c
+@@ -1197,14 +1197,16 @@
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct aml_spdif *p_spdif = runtime->private_data;
+-	unsigned int addr, start_addr;
++	unsigned int addr, start_addr, fill;
+ 	snd_pcm_uframes_t frames;
+ 
+ 	start_addr = runtime->dma_addr;
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+-		addr = aml_frddr_get_position(p_spdif->fddr);
+-	else
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		addr = aml_frddr_get_position_fill(p_spdif->fddr, &fill);
++		runtime->delay = bytes_to_frames(runtime, fill);
++	} else {
+ 		addr = aml_toddr_get_position(p_spdif->tddr);
++	}
+ 
+ 	frames = bytes_to_frames(runtime, addr - start_addr);
+ 	if (frames > runtime->buffer_size)
+@@ -1539,6 +1541,7 @@
+ 			if (p_spdif->chipinfo->async_fifo)
+ 				aml_frddr_check(p_spdif->fddr);
+ 			aml_frddr_enable(p_spdif->fddr, 0);
++			runtime->delay = 0;
+ 		} else {
+ 			bool toddr_stopped = false;
+ 			if (p_spdif->id == 0) {
+diff --git a/sound/soc/amlogic/auge/tdm.c b/sound/soc/amlogic/auge/tdm.c
+--- a/sound/soc/amlogic/auge/tdm.c
++++ b/sound/soc/amlogic/auge/tdm.c
+@@ -1600,14 +1600,16 @@
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct aml_tdm *p_tdm = runtime->private_data;
+-	unsigned int addr, start_addr;
++	unsigned int addr, start_addr, fill;
+ 	snd_pcm_uframes_t frames;
+ 
+ 	start_addr = runtime->dma_addr;
+-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+-		addr = aml_frddr_get_position(p_tdm->fddr);
+-	else
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		addr = aml_frddr_get_position_fill(p_tdm->fddr, &fill);
++		runtime->delay = bytes_to_frames(runtime, fill);
++	} else {
+ 		addr = aml_toddr_get_position(p_tdm->tddr);
++	}
+ 
+ 	frames = bytes_to_frames(runtime, addr - start_addr);
+ 	if (frames > runtime->buffer_size)
+@@ -2444,6 +2446,7 @@
+ 				aml_frddr_check(p_tdm->fddr);
+ 
+ 			aml_frddr_enable(p_tdm->fddr, false);
++			runtime->delay = 0;
+ 
+ 			/* The channel map control is now removed in .close, not
+ 			 * here - see aml_dai_tdm_chmap_ctl_remove(). Tearing it

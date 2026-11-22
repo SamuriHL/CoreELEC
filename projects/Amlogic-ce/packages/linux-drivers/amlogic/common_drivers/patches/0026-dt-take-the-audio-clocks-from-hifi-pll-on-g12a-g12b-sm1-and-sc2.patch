@@ -1,0 +1,184 @@
+From 95e9772a76244a2cacf596ab07231d0b54709254 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 1 Nov 2026 14:44:48 -0600
+Subject: [PATCH] DT: take the audio clocks from hifi_pll on g12a, g12b, sm1
+ and sc2
+
+The HDMI TDM-C, S/PDIF-B and optical S/PDIF-A outputs run from MPLLs,
+on sc2 for the 44.1 kHz family and TDM-C 48 kHz. The hardware runs them
+about 20 ppm slow at 48 kHz and 22 ppm at 44.1 kHz, so audio drifts
+against video. hifi_pll reaches both rates within 0.1 ppm, and the
+drivers retune it per rate family.
+---
+ .../dts/amlogic/coreelec_g12a_common.dtsi     | 26 +++++++++++++++++--
+ .../dts/amlogic/coreelec_g12b_common.dtsi     | 20 ++++++++++++--
+ .../boot/dts/amlogic/coreelec_sc2_common.dtsi | 26 +++++++++++++++++--
+ .../boot/dts/amlogic/coreelec_sm1_common.dtsi | 23 ++++++++++++++--
+ 4 files changed, 87 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+index 361512b84..fcb93ab9d 100644
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12a_common.dtsi
+@@ -157,14 +157,36 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, g12a-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
+-				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL>;
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
+ 	};
+ 
+ 	aml_tdmb: tdmb {
+ 		/delete-property/ start_clk_enable;
+ 		/delete-property/ clk_tuning_enable;
+ 	};
++
++	aml_spdif: spdif {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT
++				&clkaudio CLKID_AUDIO_SPDIFIN_CTRL
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout";
++	};
++
++	aml_spdif_b: spdif_b {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_SPDIFOUTB
++				&clkaudio CLKID_AUDIO_SPDIFOUTB_CTRL>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout";
++	};
+ };
+ 
+ &aocec {
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+index 9dcee64c7..463508615 100644
+--- a/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_g12b_common.dtsi
+@@ -249,8 +249,9 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, g12a-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
+-				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL>;
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
+ 	};
+ 
+ 	aml_tdmb: tdmb {
+@@ -258,11 +259,26 @@
+ 	};
+ 
+ 	aml_spdif: spdif {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT
++				&clkaudio CLKID_AUDIO_SPDIFIN_CTRL
++				&clkaudio CLKID_AUDIO_SPDIFOUT_CTRL>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout";
+ 		pinctrl-0 = <&spdifout>;
+ 		suspend-clk-off = <0>;
+ 	};
+ 
+ 	aml_spdif_b: spdif_b {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_SPDIFOUTB
++				&clkaudio CLKID_AUDIO_SPDIFOUTB_CTRL>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout";
+ 		suspend-clk-off = <0>;
+ 	};
+ };
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+index 02a6becb3..68e23705f 100644
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sc2_common.dtsi
+@@ -169,8 +169,30 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, tm2-revb-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
+-				&clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL>;
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
++	};
++
++	spdifa: spdif@0 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_GATE_SPDIFIN
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_A
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout";
++	};
++
++	spdifb: spdif@1 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_B
++				&clkaudio CLKID_AUDIO_SPDIFOUT_B>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout";
+ 	};
+ };
+ 
+diff --git a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+index 80a04fc53..d4543bb8c 100644
+--- a/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
++++ b/arch/arm64/boot/dts/amlogic/coreelec_sm1_common.dtsi
+@@ -240,8 +240,9 @@
+ 	aml_i2s2hdmi: i2s2hdmi {
+ 		compatible = "amlogic, sm1-snd-tdmc";
+ 		clocks = <&clkaudio CLKID_AUDIO_MCLK_C
+-				 &clkc CLKID_MPLL2>;
+-		clock-names = "mclk", "clk_srcpll";
++				 &clkc CLKID_HIFI_PLL
++				 &clkc CLKID_HIFI_PLL>;
++		clock-names = "mclk", "clk_srcpll", "clk_src_cd";
+ 	};
+ 
+ 	tdmb: tdm@1 {
+@@ -250,8 +251,26 @@
+ 	};
+ 
+ 	spdifa: spdif@0 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkc CLKID_FCLK_DIV4
++				&clkaudio CLKID_AUDIO_GATE_SPDIFIN
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_A
++				&clkaudio CLKID_AUDIO_SPDIFIN
++				&clkaudio CLKID_AUDIO_SPDIFOUT_A>;
++		clock-names = "sysclk", "clk_src_cd", "fixed_clk", "gate_spdifin",
++				"gate_spdifout", "clk_spdifin", "clk_spdifout";
+ 		/delete-property/ clk_tuning_enable;
+ 	};
++
++	spdifb: spdif@1 {
++		clocks = <&clkc CLKID_HIFI_PLL
++				&clkc CLKID_HIFI_PLL
++				&clkaudio CLKID_AUDIO_GATE_SPDIFOUT_B
++				&clkaudio CLKID_AUDIO_SPDIFOUT_B>;
++		clock-names = "sysclk", "clk_src_cd",
++				"gate_spdifout", "clk_spdifout";
++	};
+ };
+ 
+ &aml_wifi {
