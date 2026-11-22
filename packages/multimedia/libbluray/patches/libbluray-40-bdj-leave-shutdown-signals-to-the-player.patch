@@ -1,0 +1,26 @@
+From 9817db109e7637ef23a7dd7d38f11c218bea381c Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 26 Oct 2026 22:22:34 -0500
+Subject: [PATCH] bdj: leave shutdown signals to the player
+
+The JVM runs inside the player process and is kept until the process
+ends. Without -Xrs it installs its own SIGTERM, SIGINT and SIGHUP
+handlers over the player's. A stop then runs the Java shutdown, which
+calls exit() while the player is still running, and the player crashes
+in its own torn-down static objects.
+---
+ src/libbluray/bdj/bdj.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/libbluray/bdj/bdj.c b/src/libbluray/bdj/bdj.c
+index 543ec11cdb..dba9d9ee21 100644
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -920,6 +920,7 @@ static int _create_jvm(void *jvm_lib, const char *java_home, BDJ_CONFIG *cfg,
+     option[n++].optionString = str_dup   ("-Xms256M");
+     option[n++].optionString = str_dup   ("-Xmx256M");
+     option[n++].optionString = str_dup   ("-Xss2048k");
++    option[n++].optionString = str_dup   ("-Xrs");
+     option[n++].optionString = str_dup   ("-Djava.io.tmpdir=/storage/.kodi/userdata/addon_data/tools.jre.zulu");
+     BD_DEBUG(DBG_BDJ | DBG_CRIT, "Use /storage/.kodi/userdata/addon_data/tools.jre.zulu as cache dir.\n");
+     option[n++].optionString = str_dup   ("-Djava.awt.headless=false");

@@ -1,0 +1,28 @@
+From 1ddda441400a59e6fb61bc665eedff6ea3b685cf Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 21:58:42 -0600
+Subject: [PATCH] hdmv_vm: end a button program at a link command
+
+A link command in a button program only queues the seek, and the VM
+resumes the program at the next command. Commands an author placed
+after the link, reachable only if the link continued, then run. On the
+Spears & Munsil UHD test clips that turns a next-pattern key into a jump
+to another pattern group.
+---
+ src/libbluray/hdmv/hdmv_vm.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/libbluray/hdmv/hdmv_vm.c b/src/libbluray/hdmv/hdmv_vm.c
+index e1b5a81775..ae226a8fe3 100644
+--- a/src/libbluray/hdmv/hdmv_vm.c
++++ b/src/libbluray/hdmv/hdmv_vm.c
+@@ -685,6 +685,9 @@ static int _link_at(HDMV_VM *p, int playitem, int playmark)
+         _queue_event(p, HDMV_EVENT_PLAY_PM, playmark);
+     }
+ 
++    /* terminate */
++    p->pc = 1 << 17;
++
+     return 0;
+ }
+ 

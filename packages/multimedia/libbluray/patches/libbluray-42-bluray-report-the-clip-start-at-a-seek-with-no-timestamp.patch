@@ -1,0 +1,31 @@
+From 6e9651d622d7452e8cc3702eff4edcdcf9bea45c Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Wed, 28 Oct 2026 05:07:04 -0500
+Subject: [PATCH] bluray: report the clip start at a seek with no timestamp
+
+A seek into a clip whose first packet comes before its first EP entry
+finds no timestamp for that packet. The lookup then gives media time 0,
+which is below the clip's in time, so the conversion to title time is
+skipped. BD_EVENT_SEEK and the BD-J seek event report time 0 instead
+of the title time of the clip start.
+---
+ src/libbluray/bluray.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 6a4a8a47b9..aaf7bd4752 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -1746,9 +1746,10 @@ static int64_t _seek_internal(BLURAY *bd,
+         media_time = _update_time_psr_from_stream(bd);
+ 
+         /* emit notification events */
+-        if (media_time >= clip->in_time) {
+-            media_time = media_time - clip->in_time + clip->title_time;
++        if (media_time < clip->in_time) {
++            media_time = clip->in_time;
+         }
++        media_time = media_time - clip->in_time + clip->title_time;
+         _queue_event(bd, BD_EVENT_SEEK, media_time);
+         _bdj_event(bd, BDJ_EVENT_SEEK, media_time);
+ 

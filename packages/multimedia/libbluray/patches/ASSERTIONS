@@ -113,3 +113,33 @@ src/libbluray/bdnav/clpi_parse.c:if (jj > 0) {:1
 # the two below also occur once in pristine 1.5.0: the count (2) is what catches a dropped hunk
 src/libbluray/bdnav/clpi_parse.c:if (cpi->num_stream_pid < 1 || !cpi->entry) {:2
 src/libbluray/bdnav/navigation.c:if (angle > 8) {:2
+
+# --- 40-50: ce-canary libbluray fixes (matthane), release plan C3 2026-11-21 ---
+# canary numbers 05, 09-16, 21, 22 -> ours 40-50, same order, after our stack.
+# 40 (canary 05): the JVM leaves SIGTERM/SIGINT to the player (-Xrs)
+src/libbluray/bdj/bdj.c:option[n++].optionString = str_dup   ("-Xrs");:1
+# 41 (09): a composition crop is clamped to its object (OOB reads)
+src/libbluray/decoders/graphics_controller.c:PG object crop outside of object:1
+src/libbluray/decoders/graphics_controller.c:crop_h = BD_MIN(cobj->crop_h, object->height - cobj->crop_y);:1
+# 42 (10): clip start reported at a seek with no timestamp
+src/libbluray/bluray.c:media_time = media_time - clip->in_time + clip->title_time;:1
+# 43 (11, Java): title-bound xlets stop before the disc-bound ones
+src/libbluray/bdj/java/org/videolan/BDJLoader.java:Enumeration titleIds = db.getAppIDs(new CurrentServiceFilter());:1
+# 44 (12): a seek re-arms the playlist end (pristine 1 + this patch = 2);
+#     its bluray.h hunk was re-anchored past our libbluray-13 block
+src/libbluray/bluray.c:bd->end_of_playlist = 0;:2
+src/libbluray/bluray.h:#define BD_SEEK_REARMS_PLAYLIST_END 1:1
+# 45 (13): an undrawn always-on page takes keys (definition + 2 callers)
+src/libbluray/decoders/graphics_controller.c:static int _page_takes_input(GRAPHICS_CONTROLLER *gc):1
+src/libbluray/decoders/graphics_controller.c:_page_takes_input(gc):2
+# 46 (14): the menu status closes when a playlist drops its IG
+src/libbluray/bluray.c:/* the menu of a dropped IG is closed */:1
+# 47 (15): a link command ends the button program (pristine 1 + 1)
+src/libbluray/hdmv/hdmv_vm.c:p->pc = 1 << 17;:2
+# 48 (16): the cleared plane is flushed at a page change
+src/libbluray/decoders/graphics_controller.c:/* the clear reaches the display even when the new page draws nothing */:1
+# 49 (21, Java): best score kept when choosing a screen configuration
+src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java:int s = hbcta[j].match(hbcArray[i]);:1
+src/libbluray/bdj/java/org/havi/ui/HGraphicsDevice.java:isCurrentSize(hgcArray:2
+# 50 (22, Java): preferred properties count in the match score
+src/libbluray/bdj/java/org/havi/ui/HScreenConfigTemplate.java:return supported ? 0 : 1;:1

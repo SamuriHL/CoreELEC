@@ -1,0 +1,50 @@
+From d394a19a97de9e6a59159ae393c2861dedc94574 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 27 Oct 2026 23:44:21 -0500
+Subject: [PATCH] graphics_controller: clamp a composition crop to its object
+
+A composition crop comes from the disc and is never checked against
+its object. Below the object, rle_crop_object() reads past the
+object's runs, and a full-width crop skips that call, so the player
+reads past them instead. A crop wider than the rest of the line sends
+lines shorter than its width, so the player reads unwritten runs.
+---
+ src/libbluray/decoders/graphics_controller.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/src/libbluray/decoders/graphics_controller.c b/src/libbluray/decoders/graphics_controller.c
+index c837da3ab8..4fb4f8d79c 100644
+--- a/src/libbluray/decoders/graphics_controller.c
++++ b/src/libbluray/decoders/graphics_controller.c
+@@ -617,17 +617,27 @@ static void _render_composition_object(GRAPHICS_CONTROLLER *gc,
+         ov.img     = object->img;
+ 
+         if (cobj->crop_flag) {
+-            if (cobj->crop_x || cobj->crop_y || cobj->crop_w != object->width) {
++            uint16_t crop_w, crop_h;
++
++            if (cobj->crop_x >= object->width || cobj->crop_y >= object->height ||
++                !cobj->crop_w || !cobj->crop_h) {
++                BD_DEBUG(DBG_DECODE | DBG_CRIT, "PG object crop outside of object\n");
++                return;
++            }
++            crop_w = BD_MIN(cobj->crop_w, object->width - cobj->crop_x);
++            crop_h = BD_MIN(cobj->crop_h, object->height - cobj->crop_y);
++
++            if (cobj->crop_x || cobj->crop_y || crop_w != object->width) {
+                 cropped_img = rle_crop_object(object->img, object->width,
+-                                              cobj->crop_x, cobj->crop_y, cobj->crop_w, cobj->crop_h);
++                                              cobj->crop_x, cobj->crop_y, crop_w, crop_h);
+                 if (!cropped_img) {
+                     BD_DEBUG(DBG_DECODE | DBG_CRIT, "Error cropping PG object\n");
+                     return;
+                 }
+                 ov.img = cropped_img;
+             }
+-            ov.w  = cobj->crop_w;
+-            ov.h  = cobj->crop_h;
++            ov.w  = crop_w;
++            ov.h  = crop_h;
+         }
+ 
+         ov.palette_update_flag = palette_update_flag;

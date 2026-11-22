@@ -1,0 +1,70 @@
+From 8ea61958d703dee716f85839940e747be85a0605 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 09:31:45 -0600
+Subject: [PATCH] graphics_controller: activate an undrawn always-on page
+
+_user_input() drops every key while ig_drawn is 0, and the menu status
+follows ig_drawn, which only a rendered button object sets. An always-on
+page whose buttons have no objects, as on the Spears & Munsil UHD test
+clips, takes no key and raises no BD_EVENT_MENU. A hardware player
+treats a shown always-on page as active.
+---
+ src/libbluray/decoders/graphics_controller.c | 31 ++++++++++++++++++--
+ 1 file changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/src/libbluray/decoders/graphics_controller.c b/src/libbluray/decoders/graphics_controller.c
+index 4fb4f8d79c..8f0a771bcc 100644
+--- a/src/libbluray/decoders/graphics_controller.c
++++ b/src/libbluray/decoders/graphics_controller.c
+@@ -1534,6 +1534,33 @@ static int _render_page(GRAPHICS_CONTROLLER *gc,
+ #define VK_IS_CURSOR(vk)  (vk >= BD_VK_UP && vk <= BD_VK_RIGHT)
+ #define VK_TO_NUMBER(vk)  ((vk) - BD_VK_0)
+ 
++/* an always-on page takes keys while shown, also when its buttons draw nothing */
++static int _page_takes_input(GRAPHICS_CONTROLLER *gc)
++{
++    PG_DISPLAY_SET *s       = gc->igs;
++    unsigned        page_id = bd_psr_read(gc->regs, PSR_MENU_PAGE_ID);
++    BD_IG_PAGE     *page;
++    unsigned        ii;
++
++    if (!gc->ig_open || gc->in_effects || gc->out_effects ||
++        s->ics->interactive_composition.ui_model != IG_UI_MODEL_ALWAYS_ON) {
++        return 0;
++    }
++
++    page = _find_page(&s->ics->interactive_composition, page_id);
++    if (!page) {
++        return 0;
++    }
++
++    for (ii = 0; ii < page->num_bogs; ii++) {
++        if (_find_button_bog(&page->bog[ii], gc->bog_data[ii].enabled_button)) {
++            return 1;
++        }
++    }
++
++    return 0;
++}
++
+ static int _user_input(GRAPHICS_CONTROLLER *gc, uint32_t key, GC_NAV_CMDS *cmds)
+ {
+     PG_DISPLAY_SET *s          = gc->igs;
+@@ -1553,7 +1580,7 @@ static int _user_input(GRAPHICS_CONTROLLER *gc, uint32_t key, GC_NAV_CMDS *cmds)
+         return -1;
+     }
+ 
+-    if (!gc->ig_drawn) {
++    if (!gc->ig_drawn && !_page_takes_input(gc)) {
+         GC_ERROR("_user_input(): menu not visible\n");
+         return 0;
+     }
+@@ -2089,7 +2116,7 @@ int gc_run(GRAPHICS_CONTROLLER *gc, gc_ctrl_e ctrl, uint32_t param, GC_NAV_CMDS
+         if (gc->igs->ics->interactive_composition.ui_model == IG_UI_MODEL_POPUP) {
+             cmds->status |= GC_STATUS_POPUP;
+         }
+-        if (gc->ig_drawn) {
++        if (gc->ig_drawn || _page_takes_input(gc)) {
+             cmds->status |= GC_STATUS_MENU_OPEN;
+         }
+         if (gc->in_effects || gc->out_effects || gc->button_animation_running || gc->user_timeout) {

@@ -1,0 +1,142 @@
+From b9759d11d1b0f8577cc8acb444522fe8a5c7d49b Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 9 Nov 2026 20:09:46 -0600
+Subject: [PATCH] bdj: keep the best score when choosing a screen configuration
+
+getBestConfiguration never stored the best score, so it compared every
+configuration with -1 and the last one that matched at all won. A disc
+asking for a graphics template without a resolution preference got the
+960x540 configuration and drew its 1920x1080 menu off screen.
+---
+ .../java/org/havi/ui/HBackgroundDevice.java   | 16 +++++++---
+ .../bdj/java/org/havi/ui/HGraphicsDevice.java | 29 ++++++++++++++++---
+ .../bdj/java/org/havi/ui/HVideoDevice.java    | 16 +++++++---
+ 3 files changed, 49 insertions(+), 12 deletions(-)
+
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+index 08c5c56b49..7daaabc783 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HBackgroundDevice.java
+@@ -57,9 +57,13 @@ public class HBackgroundDevice extends HScreenDevice {
+     public HBackgroundConfiguration getBestConfiguration(HBackgroundConfigTemplate hbct) {
+         int score = -1;
+         HBackgroundConfiguration hbc = null;
+-        for (int i = 0; i < hbcArray.length; i++)
+-            if (hbct.match(hbcArray[i]) > score)
++        for (int i = 0; i < hbcArray.length; i++) {
++            int s = hbct.match(hbcArray[i]);
++            if (s > score) {
++                score = s;
+                 hbc = hbcArray[i];
++            }
++        }
+         return hbc;
+     }
+ 
+@@ -67,9 +71,13 @@ public class HBackgroundDevice extends HScreenDevice {
+         int score = -1;
+         HBackgroundConfiguration hbc = null;
+         for (int i = 0; i < hbcArray.length; i++)
+-            for (int j = 0; j < hbcta.length; j++)
+-                if (hbcta[j].match(hbcArray[i]) > score)
++            for (int j = 0; j < hbcta.length; j++) {
++                int s = hbcta[j].match(hbcArray[i]);
++                if (s > score) {
++                    score = s;
+                     hbc = hbcArray[i];
++                }
++            }
+         return hbc;
+     }
+ 
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HGraphicsDevice.java b/src/libbluray/bdj/java/org/havi/ui/HGraphicsDevice.java
+index 08ba1d92fd..39d331943e 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HGraphicsDevice.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HGraphicsDevice.java
+@@ -60,22 +60,43 @@ public class HGraphicsDevice extends HScreenDevice {
+     public HGraphicsConfiguration getBestConfiguration(HGraphicsConfigTemplate hgct) {
+         int score = -1;
+         HGraphicsConfiguration hgc = null;
+-        for (int i = 0; i < hgcArray.length; i++)
+-            if (hgct.match(hgcArray[i]) > score)
++        boolean current = false;
++        for (int i = 0; i < hgcArray.length; i++) {
++            int s = hgct.match(hgcArray[i]);
++            boolean c = isCurrentSize(hgcArray[i]);
++            if (s > score || (s == score && c && !current)) {
++                score = s;
+                 hgc = hgcArray[i];
++                current = c;
++            }
++        }
+         return hgc;
+     }
+ 
+     public HGraphicsConfiguration getBestConfiguration(HGraphicsConfigTemplate hgcta[]) {
+         int score = -1;
+         HGraphicsConfiguration hgc = null;
++        boolean current = false;
+         for (int i = 0; i < hgcArray.length; i++)
+-            for (int j = 0; j < hgcta.length; j++)
+-                if (hgcta[j].match(hgcArray[i]) > score)
++            for (int j = 0; j < hgcta.length; j++) {
++                int s = hgcta[j].match(hgcArray[i]);
++                boolean c = isCurrentSize(hgcArray[i]);
++                if (s > score || (s == score && c && !current)) {
++                    score = s;
+                     hgc = hgcArray[i];
++                    current = c;
++                }
++            }
+         return hgc;
+     }
+ 
++    /* a tie keeps the window size: the BDJO may have sized it to another configuration than the current one */
++    private static boolean isCurrentSize(HGraphicsConfiguration hgc) {
++        GUIManager mgr = GUIManager.getInstance();
++        Dimension d = hgc.getPixelResolution();
++        return d.width == mgr.getWidth() && d.height == mgr.getHeight();
++    }
++
+     public HGraphicsConfiguration getCurrentConfiguration() {
+         return hgc;
+     }
+diff --git a/src/libbluray/bdj/java/org/havi/ui/HVideoDevice.java b/src/libbluray/bdj/java/org/havi/ui/HVideoDevice.java
+index c058438d4c..8847c19c48 100644
+--- a/src/libbluray/bdj/java/org/havi/ui/HVideoDevice.java
++++ b/src/libbluray/bdj/java/org/havi/ui/HVideoDevice.java
+@@ -55,9 +55,13 @@ public class HVideoDevice extends HScreenDevice {
+     public HVideoConfiguration getBestConfiguration(HVideoConfigTemplate hvct) {
+         int score = -1;
+         HVideoConfiguration hvc = null;
+-        for (int i = 0; i < hvcArray.length; i++)
+-            if (hvct.match(hvcArray[i]) > score)
++        for (int i = 0; i < hvcArray.length; i++) {
++            int s = hvct.match(hvcArray[i]);
++            if (s > score) {
++                score = s;
+                 hvc = hvcArray[i];
++            }
++        }
+         return hvc;
+     }
+ 
+@@ -65,9 +69,13 @@ public class HVideoDevice extends HScreenDevice {
+         int score = -1;
+         HVideoConfiguration hvc = null;
+         for (int i = 0; i < hvcArray.length; i++) 
+-            for (int j = 0; j < hvcta.length; j++)
+-                if (hvcta[j].match(hvcArray[i]) > score)
++            for (int j = 0; j < hvcta.length; j++) {
++                int s = hvcta[j].match(hvcArray[i]);
++                if (s > score) {
++                    score = s;
+                     hvc = hvcArray[i];
++                }
++            }
+         return hvc;
+     }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,34 @@
+From 97d9e38c359a5e321db270159ecebe3b82978ff2 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 09:31:54 -0600
+Subject: [PATCH] bluray: close the menu status when a playlist drops its IG
+
+Closing a playlist resets the graphics controller without reading its
+status, so the cached menu status of the dropped IG stays set. When the
+next IG opens a page that takes keys at once, no change is seen and
+BD_EVENT_MENU is not sent again, although players reset their menu
+state at the title change.
+---
+ src/libbluray/bluray.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index 376b399917..d69ddf35b0 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -2479,6 +2479,15 @@ static void _close_playlist(BLURAY *bd)
+         gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
+     }
+ 
++    /* the menu of a dropped IG is closed */
++    if (bd->gc_status & GC_STATUS_MENU_OPEN) {
++        _queue_event(bd, BD_EVENT_MENU, 0);
++    }
++    if (bd->gc_status & GC_STATUS_POPUP) {
++        _queue_event(bd, BD_EVENT_POPUP, 0);
++    }
++    bd->gc_status = GC_STATUS_NONE;
++
+     /* stopping playback in middle of playlist ? */
+     if (bd->title && bd->st0.clip) {
+         if (bd->st0.clip->ref < bd->title->clip_list.count - 1) {

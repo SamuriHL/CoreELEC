@@ -1,0 +1,26 @@
+From 6ef0510deb6668bf9bec3bd45c66552768d5cdea Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Mon, 2 Nov 2026 23:29:20 -0600
+Subject: [PATCH] graphics_controller: flush the cleared plane at a page change
+
+_select_page() clears the IG plane but leaves ig_dirty unset. A new page
+whose buttons draw nothing renders no object, so the clear is never
+flushed and players keep showing the old page. A disc that closes its
+menu by switching to such a page leaves the menu on screen.
+---
+ src/libbluray/decoders/graphics_controller.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/libbluray/decoders/graphics_controller.c b/src/libbluray/decoders/graphics_controller.c
+index 8f0a771bcc..094168c76d 100644
+--- a/src/libbluray/decoders/graphics_controller.c
++++ b/src/libbluray/decoders/graphics_controller.c
+@@ -735,6 +735,8 @@ static void _select_page(GRAPHICS_CONTROLLER *gc, uint16_t page_id, int out_effe
+ 
+     if (gc->ig_open && !gc->out_effects) {
+         _clear_osd(gc, BD_OVERLAY_IG);
++        /* the clear reaches the display even when the new page draws nothing */
++        gc->ig_dirty = 1;
+     }
+ }
+ 

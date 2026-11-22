@@ -1,0 +1,43 @@
+From 9d04ab7bdb9de500fc96bec39fcc511b25462ef1 Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Tue, 3 Nov 2026 09:31:35 -0600
+Subject: [PATCH] bluray: raise the end of a playlist again after a seek
+
+The library notes a reached playlist end and never clears it on a
+seek. A seek back after the end was read raises the BD-J end at once,
+ahead of the new pass. A seek back after the end was delivered never
+raises it again, and an application waiting for it hangs.
+
+[samurihl: ce-canary libbluray-12. bluray.h hunk re-anchored after
+ bd_set_scr() past our libbluray-13 block; content unchanged.]
+---
+ src/libbluray/bluray.c | 1 +
+ src/libbluray/bluray.h | 3 +++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/src/libbluray/bluray.c b/src/libbluray/bluray.c
+index aaf7bd4752..376b399917 100644
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -1741,6 +1741,7 @@ static int64_t _seek_internal(BLURAY *bd,
+ 
+         /* update title position */
+         bd->s_pos = (uint64_t)title_pkt * 192;
++        bd->end_of_playlist = 0;
+ 
+         /* Update PSR_TIME */
+         media_time = _update_time_psr_from_stream(bd);
+diff --git a/src/libbluray/bluray.h b/src/libbluray/bluray.h
+index 7ed4711ab3..a57092984f 100644
+--- a/src/libbluray/bluray.h
++++ b/src/libbluray/bluray.h
+@@ -1147,6 +1147,9 @@
+  */
+ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
+ 
++/* a seek raises the end of the playlist again */
++#define BD_SEEK_REARMS_PLAYLIST_END 1
++
+ /*
+  * BD-J presentation timing.
+  *
