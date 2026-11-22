@@ -1,0 +1,60 @@
+From 067b225e29ebd372d73473401d68a4ffcebc230e Mon Sep 17 00:00:00 2001
+From: matthane <matthan.evans@icloud.com>
+Date: Sun, 15 Nov 2026 09:33:32 -0600
+Subject: [PATCH] vh265: output the first dual layer bl picture after its el
+
+The first I picture after a decoder start is output at once. The bl
+does this when it finds the el nal, before the el instance has attached
+the dv flag and rpu. amdv can take that frame as hdr10 and switch the
+output. A tester saw this as a tv resync at fel seeks.
+---
+ drivers/frame_provider/decoder/h265/vh265.c | 29 ++++++++++++++-------
+ 1 file changed, 19 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/frame_provider/decoder/h265/vh265.c b/drivers/frame_provider/decoder/h265/vh265.c
+index aa05bdef..de89fcf4 100644
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -11804,9 +11804,6 @@ muti_output:
+ 						hevc->cur_pic->error_mark = 1;
+ 				}
+ 
+-#ifdef CONFIG_AMLOGIC_MEDIA_ENHANCEMENT_DOLBYVISION
+-force_output:
+-#endif
+ 				output_pic_display(hevc, 1, true);
+ 			}
+ 			ATRACE_COUNTER(hevc->trace.decode_time_name, DECODER_ISR_THREAD_EDN);
+@@ -11891,13 +11888,25 @@ force_output:
+ 			amhevc_stop();
+ 			if (aux_data_is_available(hevc))
+ 				dolby_get_meta(hevc);
+-			if(hevc->cur_pic && hevc->cur_pic->slice_type == 2 &&
+-				hevc->vf_pre_count == 0) {
+-				hevc_print(hevc, 0,
+-						"first slice_type %x no_switch_dvlayer_count %x\n",
+-						hevc->cur_pic->slice_type,
+-						hevc->no_switch_dvlayer_count);
+-				goto  force_output;
++			if (dec_status == HEVC_FIND_NEXT_PIC_NAL) {
++				if (hevc->cur_pic && hevc->cur_pic->slice_type == 2 &&
++					hevc->vf_pre_count == 0) {
++					hevc_print(hevc, 0,
++							"first slice_type %x no_switch_dvlayer_count %x\n",
++							hevc->cur_pic->slice_type,
++							hevc->no_switch_dvlayer_count);
++					output_pic_display(hevc, 1, true);
++				}
++				/* the el ended the access unit, so its bl picture is complete */
++				if (vdec->master) {
++					struct hevc_state_s *hevc_ba =
++						(struct hevc_state_s *)vdec->master->private;
++
++					if (hevc_ba->cur_pic &&
++						hevc_ba->cur_pic->slice_type == 2 &&
++						hevc_ba->vf_pre_count == 0)
++						output_pic_display(hevc_ba, 1, true);
++				}
+ 			}
+ 			vdec_schedule_work(&hevc->work);
+ 		}

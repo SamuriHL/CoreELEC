@@ -28,3 +28,10 @@ drivers/frame_provider/decoder/vc1/vvc1.c:COPY_DECODE_BUFFER_NUM_MAX:0
 # decode time under KEYFRAME_PTS_ONLY; the switch and the tail of the hunk
 drivers/frame_provider/decoder/vc1/vvc1.c:dts_stamps = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;:1
 drivers/frame_provider/decoder/vc1/vvc1.c:hw->held_skip = true;:1
+# 0007 (ce-canary 067b225e, matthane): the first dual-layer BL picture goes out
+# only once its EL has ended the access unit (no HDR10 blip at FEL start/seek).
+# The force_output goto path is gone from the non-v4l decoder; 0004's
+# once-per-picture guard in output_pic() stays (asserted above).
+drivers/frame_provider/decoder/h265/vh265.c:/* the el ended the access unit, so its bl picture is complete */:1
+drivers/frame_provider/decoder/h265/vh265.c:output_pic_display(hevc_ba, 1, true);:1
+drivers/frame_provider/decoder/h265/vh265.c:force_output:0
