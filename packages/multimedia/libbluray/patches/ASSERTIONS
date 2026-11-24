@@ -100,6 +100,9 @@ src/libbluray/bluray.c:entries[count].pts45      = bd->bdj_pt_queue[idx].pts45;:
 src/libbluray/bluray.c:bd->bdj_pt_reader_clip = 1;:2
 src/libbluray/bluray.c:bd->bdj_pt_queue[idx].pts45      = clip->in_time;:1
 
+# 23 bdj: an Ixc call into a callee destroyed during the call fails fast
+src/libbluray/bdj/java/org/videolan/IxcRegistryImpl.java:if (calleeGone(remoteObj.context)) {:1
+src/libbluray/bdj/java/org/videolan/IxcRegistryImpl.java:invoke(): callee destroyed during remote execution, call abandoned:1
 # 39 pre-1.5.1 hardening backport
 src/libbluray/bdj/java/org/dvb/dsmcc/NPTRate.java:    NPTRate(int numerator, int denominator) {:1
 src/libbluray/bdj/java/org/dvb/event/EventManager.java:protected EventManager() {:1
