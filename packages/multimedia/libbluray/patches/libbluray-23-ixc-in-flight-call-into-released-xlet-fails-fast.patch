@@ -2,65 +2,99 @@ From: SamuriHL <samurihl@gmail.com>
 Date: Mon, 24 Nov 2026 12:10:00 -0500
 Subject: [PATCH] bdj: an Ixc call into a callee destroyed during the call fails fast
 
-A remote call whose callee xlet is destroyed while the call runs never
+A remote call whose callee xlet ends while the call runs never
 answers: the caller joins its remote thread with no bound, so the
 caller's own destroyXlet (and with it BDJAppProxy.release()) waits for
 the 5 s STOP timeout and the Ixc thread's 1 s wait before the shutdown
-goes on. On Universal discs (M3GAN 2.0, UniversalTitleBoundXlet calling
-TitleChangeHandler.titleDestroyed() on the title xlet it is stopping
-with) every disc stop and every Kodi quit with the menu up paid about
-6.5 s for it.
+goes on. On Universal discs (M3GAN 2.0: UniversalTitleBoundXlet calling
+TitleChangeHandler.titleDestroyed() on the title xlet stopped with it)
+every disc stop and every Kodi quit with the menu up paid about 6.5 s.
 
-The caller now joins in 100 ms steps and, when the callee's context is
-released or its xlet is DESTROYED, interrupts the remote thread and
+The callee's context now counts the ends of its xlet (destroyXlet
+returned, a CMD_NOTIFY_DESTROYED, exitXlet). The caller records the
+count at the call and joins in 100 ms steps; when it moves, or the
+callee's context is released, it interrupts the remote thread and
 throws RemoteException("callee destroyed during remote execution"), as
-invoke() already refuses a call into a released callee. Logged at ERROR
-("invoke(): callee destroyed during remote execution, call abandoned")
-so a gate can count it.
+invoke() already refuses a call into a released callee. The proxy's
+state cannot tell: a destroyed proxy goes from DESTROYED back to
+NOT_LOADED at once (the ixcdiag run read NOT_LOADED, then STARTED, all
+through the hang), and the context is released only after the
+caller's own stop. Logged at ERROR ("invoke(): callee destroyed during
+remote execution, call abandoned") so a gate can count it.
 
 ---
+--- a/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJAppProxy.java
+@@ -306,6 +306,7 @@
+         if ((state != NOT_LOADED) && (state != LOADED)) {
+             try {
+                 xlet.destroyXlet(force);
++                context.noteXletEnded();
+ 
+                 context.closeSockets();
+                 context.getThreadGroup().waitForShutdown(1000, 1 + context.numEventQueueThreads());
+@@ -444,6 +445,7 @@
+                 ret = doResume();
+                 break;
+             case AppCommand.CMD_NOTIFY_DESTROYED:
++                context.noteXletEnded();
+                 toState = DESTROYED;
+                 state = DESTROYED;
+                 ret = true;
+--- a/src/libbluray/bdj/java/org/videolan/BDJXletContext.java
++++ b/src/libbluray/bdj/java/org/videolan/BDJXletContext.java
+@@ -196,6 +196,20 @@
+         return AppsDatabase.getAppsDatabase().getAppProxy(appid);
+     }
+ 
++    /* An xlet of this context ended (its destroyXlet returned, it notified its own destruction, or
++     * the context exited): bumped at each, so an Ixc call into the xlet instance it was made to
++     * can tell that instance is gone even when the proxy is reused (DESTROYED becomes NOT_LOADED
++     * at once) and the context is not released yet. */
++    protected void noteXletEnded() {
++        xletEnds++;
++    }
++
++    protected int getXletEnds() {
++        return xletEnds;
++    }
++
++    private volatile int xletEnds = 0;
++
+     public boolean isReleased() {
+         return released;
+     }
+@@ -488,6 +502,8 @@
+         // Called from AppProxy when destroyXlet() has been called.
+         // Release as much resources as possible while running in Xlet context.
+ 
++        noteXletEnded();
++
+         org.dvb.io.ixc.IxcRegistry.unbindAll(this);
+ 
+         closeSockets();
 --- a/src/libbluray/bdj/java/org/videolan/IxcRegistryImpl.java
 +++ b/src/libbluray/bdj/java/org/videolan/IxcRegistryImpl.java
-@@ -39,6 +39,8 @@
+@@ -236,8 +236,26 @@
  
- import javax.tv.xlet.XletContext;
- 
-+import org.dvb.application.AppProxy;
-+
- import org.videolan.BDJXletContext;
- 
- 
-@@ -208,6 +210,14 @@
-             this.remoteObj = remoteObj;
-         }
- 
-+        private boolean calleeGone(BDJXletContext context) {
-+            if (null == context || context.isReleased()) {
-+                return true;
-+            }
-+            AppProxy proxy = context.getAppProxy();
-+            return proxy != null && proxy.getState() == AppProxy.DESTROYED;
-+        }
-+
-         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-             if (null == remoteObj.context || remoteObj.context.isReleased()) {
-                 Debug("invoke(): callee has been destroyed");
-@@ -237,7 +247,22 @@
              remoteMethod.callerContext.addIxcThread(remoteThread);
              remoteThread.setDaemon(false);
++            /* The callee xlet instance this call goes into: if it ends during the call (or its
++             * context is released) the call never answers. Fail then, as a call into a destroyed
++             * callee does above, instead of holding the caller (and its xlet's stop) until the
++             * caller is killed. */
++            final BDJXletContext callee = remoteObj.context;
++            final int calleeEnds = callee.getXletEnds();
              remoteThread.start();
 -            remoteThread.join();
-+            /* A callee destroyed during the call (its xlet stopped, or its context released) never
-+             * answers: fail as a call into a destroyed callee does above, instead of holding the
-+             * caller (and its xlet's stop) until the caller is killed. */
 +            while (true) {
 +                remoteThread.join(100);
 +                if (!remoteThread.isAlive()) {
 +                    break;
 +                }
-+                if (calleeGone(remoteObj.context)) {
++                if (callee.isReleased() || callee.getXletEnds() != calleeEnds) {
 +                    logger.error("invoke(): callee destroyed during remote execution, call abandoned: " +
-+                                 method + " (callee " + remoteObj.context + ")");
++                                 method + " (callee " + callee + ")");
 +                    remoteThread.interrupt();
 +                    remoteMethod.callerContext.removeIxcThread(remoteThread);
 +                    throw new RemoteException("callee destroyed during remote execution");
