@@ -23,3 +23,15 @@ drivers/frame_provider/decoder/h265/vh265.c:vdec->slave ? vdec->slave : vdec->ma
 drivers/frame_provider/decoder/h265/vh265.c:pic_display->fast_output_done = 1;:1
 drivers/frame_provider/decoder/h265/vh265.c:new_pic->fast_output_done = 0;:1
 drivers/frame_provider/decoder/h265/vh265.c:pic_display = fast_pic = pic;:1
+# 0005: vvc1 shows skipped pictures (the call and the double-release guard)
+drivers/frame_provider/decoder/vc1/vvc1.c:hw->skip_pending++;:1
+drivers/frame_provider/decoder/vc1/vvc1.c:vvc1_skipped_picture(hw);:1
+drivers/frame_provider/decoder/vc1/vvc1.c:pts = hw->last_show_pts + DUR2PTS(:1
+drivers/frame_provider/decoder/vc1/vvc1.c:hw->ref_pic[0] = hw->ref_pic[1];:2
+drivers/frame_provider/decoder/vc1/vvc1.c:if (hw->buf_use[vf->index] > 0):2
+drivers/frame_provider/decoder/vc1/vvc1.c:decode_order = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;:1
+drivers/frame_provider/decoder/vc1/vvc1.c:show->skipped = pic->skipped || !pic->pts_valid;:1
+drivers/frame_provider/decoder/vc1/vvc1.c:while (kfifo_len(&newframe_q) < 2 &&:1
+drivers/frame_provider/decoder/vc1/vvc1.c:			vf->duration = vvc1_amstream_dec_info.rate;:1
+drivers/frame_provider/decoder/vc1/vvc1.c:		if (decode_order):5
+drivers/frame_provider/decoder/vc1/vvc1.c:/* decode times: the first one now, a skip decodes a frame on */:1

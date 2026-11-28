@@ -1,0 +1,317 @@
+From: SamuriHL <samurihl@gmail.com>
+Date: Fri, 27 Nov 2026 20:40:00 -0500
+Subject: [PATCH] vvc1: show skipped pictures, decode-order times
+
+A VC-1 skipped picture (a P picture with no coded data) repeats the
+newest anchor. The firmware reports DECODE_STATUS_PIC_SKIPPED and the
+driver returned without a picture: the repeat was never shown, the
+anchor before it came out only at the next coded anchor (about half a
+second late, out of order), and while only one anchor was known the B
+pictures that followed were dropped too. A static opening (The Last
+Samurai, VfW-mode MKV) lost 42 pictures in the first two seconds and
+again near 16 s.
+
+Take a skipped picture into refs[] as a P picture on the newest
+anchor's buffer and show it in its turn. The firmware reports the skip
+before the picture decoded ahead of it, so it is taken in after that
+picture's done. VC1_OFFSET_REG then holds another picture's offset, so
+the time is the picture shown before it plus a frame. The anchors are
+kept as pic_info copies so that one buffer can stand for two pictures;
+that buffer is shown twice, so buf_use no longer drops below zero on
+release. A skip takes no decode buffer, so nothing held the firmware
+back: a black opening of 13 skips per GOP (2010) used up the frame pool
+and lost ten pictures. A skip now waits for frame slots.
+
+With KEYFRAME_PTS_ONLY (AVI and MKV VfW mode) every picture carries its
+decode time. A B picture shows at its own; an anchor shows at the next
+anchor's decode time, after the B pictures decoded behind that one. The
+anchor shown when the next one arrives now takes that one's time (the
+first anchor, shown at once before, now waits for the second), so the
+times come out in display order for any cadence, soft telecine
+included (Dreamgirls, 2:3 at 29.97). There an interlaced picture also
+went out as two field frames, each with a frame's place in the player's
+timeline: one frame per picture now, the deinterlacer takes the fields.
+---
+--- a/drivers/frame_provider/decoder/vc1/vvc1.c
++++ b/drivers/frame_provider/decoder/vc1/vvc1.c
+@@ -149,6 +149,8 @@
+ static u32 buf_size = 32 * 1024 * 1024;
+ static u32 buf_offset;
+ static u32 avi_flag;
++/* KEYFRAME_PTS_ONLY: every picture carries its decode time (AVI, MKV VfW) */
++static u32 decode_order;
+ static u32 unstable_pts_debug;
+ static u32 unstable_pts;
+ static u32 vvc1_ratio;
+@@ -233,6 +235,7 @@
+ 	u32 picture_type;
+ 	unsigned short decode_pic_count;
+ 	u32 repeat_cnt;
++	bool skipped;
+ };
+ 
+ struct vdec_vc1_hw_s {
+@@ -267,6 +270,14 @@
+ 	s32 buf_use[DECODE_BUFFER_NUM_MAX];
+ 	u32 decoding_index;
+ 	struct pic_info_t pics[DECODE_BUFFER_NUM_MAX];
++	/* the anchors in refs[], as shown (a skipped picture shares a buffer) */
++	struct pic_info_t ref_pic[2];
++	/* skipped pictures reported before the picture decoded ahead of them */
++	u32 skip_pending;
++	/* the time of the picture shown last */
++	bool last_show_valid;
++	u32 last_show_pts;
++	u64 last_show_pts64;
+ 	u32 interlace_flag;
+ 	u32 new_type;
+ 	u32 canvas_mode;
+@@ -447,28 +458,61 @@
+ 	return 0;
+ }
+ 
+-static int update_reference(struct vdec_vc1_hw_s *hw,	int index)
++static struct pic_info_t *update_reference(struct vdec_vc1_hw_s *hw,
++	struct pic_info_t *pic)
+ {
+-	hw->ref_use[index]++;
++	struct pic_info_t *show = NULL;
++
++	hw->ref_use[pic->index]++;
+ 	if (hw->refs[1] == -1) {
+-		hw->refs[1] = index;
+ 		/*
+ 		* first pic need output to show
+ 		* usecnt do not decrease.
+ 		*/
++		show = pic;
++		/* decode times: it shows at the next anchor's, below */
++		if (decode_order) {
++			show = NULL;
++			hw->throw_pb_flag = 0;
++		}
+ 	} else if (hw->refs[0] == -1) {
+-		hw->refs[0] = hw->refs[1];
+-		hw->refs[1] = index;
+ 		/* second pic do not output */
+-		index = hw->vf_buf_num_used;
++		hw->refs[0] = hw->refs[1];
++		hw->ref_pic[0] = hw->ref_pic[1];
++		/* decode times: the first one now, a skip decodes a frame on */
++		if (decode_order) {
++			show = &hw->ref_pic[0];
++			if (pic->pts_valid && !pic->skipped) {
++				show->pts = pic->pts;
++				show->pts64 = pic->pts64;
++			} else {
++				show->pts += DUR2PTS(vvc1_amstream_dec_info.rate);
++				show->pts64 += div_u64((u64)vvc1_amstream_dec_info.rate *
++					1000000, 96000);
++			}
++		}
+ 	} else {
+ 		hw->ref_use[hw->refs[0]]--; 	//old ref0 unused
+ 		hw->refs[0] = hw->refs[1];
+-		hw->refs[1] = index;
+-		index = hw->refs[0];
++		hw->ref_pic[0] = hw->ref_pic[1];
++		show = &hw->ref_pic[0];
++		/*
++		 * Decode times: an anchor shows at the next anchor's decode time,
++		 * after the B pictures decoded behind that one. A skipped picture
++		 * has no time of its own: the anchor then shows a frame after the
++		 * picture shown before it.
++		 */
++		if (decode_order) {
++			show->skipped = pic->skipped || !pic->pts_valid;
++			show->pts_valid = pic->pts_valid;
++			show->pts = pic->pts;
++			show->pts64 = pic->pts64;
++		}
+ 	}
++	hw->refs[1] = pic->index;
++	hw->ref_pic[1] = *pic;
+ 	vc1_print(0, VC1_DEBUG_DETAIL,"%s: hw->refs[0] = %d, hw->refs[1] = %d\n", __func__, hw->refs[0], hw->refs[1]);
+-	return index;
++	return show;
+ }
+ 
+ static int find_free_buffer(struct vdec_vc1_hw_s *hw)
+@@ -530,6 +574,20 @@
+ 	vc1_print(0, VC1_DEBUG_DETAIL, "%s: buffer_info 0x%x, index %d, picture_type %d\n",
+ 					__func__, reg, buffer_index, picture_type);
+ 
++	/* a skipped picture repeats the picture shown before it, a frame later */
++	/* (in decode-order mode: an anchor whose next anchor was skipped) */
++	if (pic->skipped) {
++		pts_valid = hw->last_show_valid;
++		pts = hw->last_show_pts + DUR2PTS(vvc1_amstream_dec_info.rate);
++		pts_us64 = hw->last_show_pts64 +
++			div_u64((u64)vvc1_amstream_dec_info.rate * 1000000, 96000);
++	}
++	hw->last_show_valid = pts_valid;
++	hw->last_show_pts = pts;
++	hw->last_show_pts64 = pts_us64;
++	vc1_print(0, VC1_DEBUG_DETAIL, "%s: show pts 0x%x valid %d skipped %d\n",
++		__func__, pts, pts_valid, pic->skipped);
++
+ 	if (hw->interlace_flag) { /* interlace */
+ 		vc1_print(0, VC1_DEBUG_DETAIL, "%s: interlace reg 0x%x\n", __func__, reg);
+ 		hw->throw_pb_flag = 0;
+@@ -633,6 +691,13 @@
+ 			vf->type |= VIDTYPE_FORCE_SIGN_IP_JOINT;
+ 		}
+ 
++		/*
++		 * Decode times: the picture is one frame, its time its own, and
++		 * the deinterlacer takes the fields. Split into two field frames
++		 * the player counted each as a picture.
++		 */
++		if (decode_order)
++			vf->duration = vvc1_amstream_dec_info.rate;
+ 		decoder_do_frame_check(vdec, vf);
+ 		if (without_display_mode) {
+ 			vvc1_vf_put(vf, vdec);
+@@ -645,6 +710,8 @@
+ 				VFRAME_EVENT_PROVIDER_VFRAME_READY,
+ 				NULL);
+ 		}
++		if (decode_order)
++			return 0;
+ 
+ 		if (kfifo_get(&newframe_q, &vf) == 0) {
+ 			pr_info
+@@ -862,6 +929,29 @@
+ 	return false;
+ }
+ 
++/*
++ * A skipped picture repeats the newest anchor. Without it in refs[] the B
++ * pictures that follow are dropped (no forward anchor yet) and the anchor
++ * itself is never shown: it is a P picture on the newest anchor's buffer,
++ * shown in its turn. The firmware reports it before the picture decoded
++ * ahead of it, so it is taken in after that one. VC1_OFFSET_REG holds
++ * another picture's offset then: its time comes from the picture shown
++ * before it.
++ */
++static void vvc1_skipped_picture(struct vdec_vc1_hw_s *hw)
++{
++	struct pic_info_t pic = hw->ref_pic[1];
++	struct pic_info_t *show;
++
++	pic.picture_type = P_PICTURE;
++	pic.skipped = true;
++	vc1_print(0, VC1_DEBUG_DETAIL, "%s: buffer %d\n", __func__, pic.index);
++
++	show = update_reference(hw, &pic);
++	if (show)
++		prepare_display_buf(hw, show);
++}
++
+ static irqreturn_t vvc1_isr_thread_handler(int irq, void *dev_id)
+ {
+ 	struct vdec_vc1_hw_s *hw = &vc1_hw;
+@@ -911,6 +1001,7 @@
+ 		return IRQ_HANDLED;
+ 	} else if (status_reg == DECODE_STATUS_PIC_SKIPPED) {//PIC Skipped
+ 		vc1_print(0, VC1_DEBUG_DETAIL, "%s: PIC_SKIPPED picture_type invalid\n", __func__);
++		hw->skip_pending++;
+ 		WRITE_VREG(DECODE_STATUS, 0);
+ 		return IRQ_HANDLED;
+ 	} else if (status_reg == DECODE_STATUS_BUF_INVALID) {
+@@ -985,6 +1076,7 @@
+ 		hw->pics[hw->decoding_index].index = hw->decoding_index;
+ 		//hw->pics[hw->decoding_index].decode_pic_count = decode_pic_count;
+ 		hw->pics[hw->decoding_index].picture_type = picture_type;
++		hw->pics[hw->decoding_index].skipped = false;
+ 		vc1_print(0, VC1_DEBUG_DETAIL, "%s: get buffer_index %d, decoding_index %d, buffer_info 0x%x, index %d, picture_type %d\n",
+ 					__func__, buffer_index, hw->decoding_index,
+ 					hw->pics[hw->decoding_index].buffer_info,
+@@ -1080,9 +1172,12 @@
+ 				vc1_print(0, VC1_DEBUG_DETAIL,"%s: index %d, buf_use %d, buffer_index %d\n",
+ 					__func__, hw->decoding_index, hw->buf_use[hw->decoding_index], buffer_index);
+ 			} else {
++				struct pic_info_t *show = NULL;
++
+ 				if ((picture_type == I_PICTURE) ||
+ 					(picture_type == P_PICTURE)) {
+-					buffer_index = update_reference(hw, hw->decoding_index);
++					show = update_reference(hw,
++						&hw->pics[hw->decoding_index]);
+ 				} else {
+ 					/* drop b frame before reference pic ready */
+ 					if (hw->refs[0] == -1) {
+@@ -1091,17 +1186,32 @@
+ 						hw->buf_use[hw->decoding_index]--;
+ 						vc1_print(0, VC1_DEBUG_DETAIL,"%s: decoding_index %d, buf_use %d\n",
+ 							__func__, hw->decoding_index, hw->buf_use[hw->decoding_index]);
++					} else if (buffer_index < hw->vf_buf_num_used) {
++						show = &hw->pics[buffer_index];
+ 					}
+ 				}
+ 
+-				if (buffer_index < hw->vf_buf_num_used) {
+-					vc1_print(0, VC1_DEBUG_DETAIL, "%s: show buffer_index %d\n",	__func__, buffer_index);
+-					prepare_display_buf(hw, &hw->pics[buffer_index]);
++				if (show) {
++					vc1_print(0, VC1_DEBUG_DETAIL, "%s: show buffer_index %d\n",	__func__, show->index);
++					prepare_display_buf(hw, show);
+ 				} else {
+ 					vc1_print(0, VC1_DEBUG_DETAIL, "%s: drop buffer_index %d\n",	__func__, buffer_index);
+ 				}
+ 			}
+ 
++			/*
++			 * Before the next picture's anchors are set below. A skip
++			 * takes no decode buffer, so nothing else holds the firmware
++			 * back: wait for frame slots (two for the fields).
++			 */
++			for (; hw->skip_pending; hw->skip_pending--) {
++				while (kfifo_len(&newframe_q) < 2 &&
++					!is_reset && !is_irq_cancel)
++					msleep(wait_time);
++				if (hw->refs[1] != -1)
++					vvc1_skipped_picture(hw);
++			}
++
+ 			frame_dur = vvc1_amstream_dec_info.rate;
+ 			frame_width = vvc1_amstream_dec_info.width;
+ 			frame_height = vvc1_amstream_dec_info.height;
+@@ -1189,7 +1299,9 @@
+ 
+ 			if (--hw->vfbuf_use[vf->index] == 0) {
+ 				WRITE_VREG(VC1_BUFFERIN, ~(1 << vf->index));
+-				hw->buf_use[vf->index]--;
++				/* a skipped picture shows its anchor's buffer again */
++				if (hw->buf_use[vf->index] > 0)
++					hw->buf_use[vf->index]--;
+ 			}
+ 
+ 			memcpy(decoder_bmmu_box_get_virt_addr(mm_blk_handle, buffer_index),
+@@ -1598,6 +1710,7 @@
+ 	vvc1_ratio = (vvc1_amstream_dec_info.ratio >> DISP_RATIO_ASPECT_RATIO_BIT);
+ 
+ 	avi_flag = (unsigned long) vvc1_amstream_dec_info.param & 0x01;
++	decode_order = ((unsigned long) vvc1_amstream_dec_info.param & 0x100) >> 8;
+ 
+ 	unstable_pts = (((unsigned long) vvc1_amstream_dec_info.param & 0x40) >> 6);
+ 	if (unstable_pts_debug == 1) {
+@@ -1622,6 +1735,8 @@
+ 	if (!is_reset) {
+ 		hw->refs[0] = -1;
+ 		hw->refs[1] = -1;
++		hw->last_show_valid = false;
++		hw->skip_pending = 0;
+ 		hw->throw_pb_flag = 1;
+ 		hw->vf_buf_num_used = DECODE_BUFFER_NUM_MAX;
+ 		hw->frame_width = 0;
+@@ -1723,7 +1838,8 @@
+ 		if (kfifo_get(&recycle_q, &vf)) {
+ 			if ((vf->index < hw->vf_buf_num_used) &&
+ 			 (--hw->vfbuf_use[vf->index] == 0)) {
+-				hw->buf_use[vf->index]--;
++				if (hw->buf_use[vf->index] > 0)
++					hw->buf_use[vf->index]--;
+ 				vf->index = hw->vf_buf_num_used;
+ 			}
+ 			kfifo_put(&newframe_q, (const struct vframe_s *)vf);
